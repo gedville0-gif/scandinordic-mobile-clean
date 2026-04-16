@@ -1,5 +1,4 @@
 {
-  "projectId": "8f41eef6-6e5c-49ff-9d1a-e18247d1cbfe",
   "cli": {
     "version": ">= 18.7.0",
     "appVersionSource": "remote"
