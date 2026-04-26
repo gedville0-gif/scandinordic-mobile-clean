@@ -1,13 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, Pressable, TextInput,
+  View, Text, ScrollView, StyleSheet, Pressable, TextInput, Alert,
 } from 'react-native';
 import { useAppDialog } from '@/components/AppDialog';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { getTransactions, getSettings } from '@/lib/storage';
@@ -61,6 +61,7 @@ export default function TaxPrepaymentScreen() {
   const [showStartPicker, setShowStartPicker] = useState(false);
   const [showEndPicker, setShowEndPicker] = useState(false);
   const periodDirty = pendingStart !== startDate || pendingEnd !== endDate;
+  const [saved, setSaved] = useState(false);
   const [allPayments, setAllPayments] = useState<TaxPayment[]>([]);
   const [showPayForm, setShowPayForm] = useState(false);
   const [payAmount, setPayAmount] = useState('');
@@ -86,12 +87,19 @@ export default function TaxPrepaymentScreen() {
   }, []);
 
   const handleSaveData = useCallback(async () => {
-    setStartDate(pendingStart);
-    setEndDate(pendingEnd);
-    await AsyncStorage.setItem(TAX_PERIOD_KEY, JSON.stringify({ start: pendingStart, end: pendingEnd }));
+    try {
+      setStartDate(pendingStart);
+      setEndDate(pendingEnd);
+      await AsyncStorage.setItem(TAX_PERIOD_KEY, JSON.stringify({ start: pendingStart, end: pendingEnd }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      Alert.alert('Error', 'Could not save data.');
+    }
   }, [pendingStart, pendingEnd]);
 
   useEffect(() => { load(); }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const periodKey = `${startDate}_${endDate}`;
   const periodPayments = allPayments.filter(p => p.periodKey === periodKey);
@@ -197,8 +205,8 @@ export default function TaxPrepaymentScreen() {
       showsVerticalScrollIndicator={false}
       keyboardShouldPersistTaps="handled"
     >
-      <Pressable style={styles.back} onPress={() => router.back()}>
-        <Feather name="arrow-left" size={18} color={COLORS.primary} />
+      <Pressable style={styles.back} onPress={() => router.back()} hitSlop={10}>
+        <Feather name="arrow-left" size={28} color={COLORS.primary} />
         <Text style={styles.backText}>{t('reports')}</Text>
       </Pressable>
       <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>
@@ -229,20 +237,24 @@ export default function TaxPrepaymentScreen() {
         </View>
         <Text style={styles.periodHint}>{t('changesNotSaved')}</Text>
       </View>
-      <DatePickerModal
-        visible={showStartPicker}
-        value={pendingStart}
-        onConfirm={d => { setPendingStart(d); setShowStartPicker(false); }}
-        onCancel={() => setShowStartPicker(false)}
-        title={t('periodStart')}
-      />
-      <DatePickerModal
-        visible={showEndPicker}
-        value={pendingEnd}
-        onConfirm={d => { setPendingEnd(d); setShowEndPicker(false); }}
-        onCancel={() => setShowEndPicker(false)}
-        title={t('periodEnd')}
-      />
+      {showStartPicker && (
+        <DatePickerModal
+          visible={showStartPicker}
+          value={pendingStart}
+          onConfirm={d => { setPendingStart(d); setShowStartPicker(false); }}
+          onCancel={() => setShowStartPicker(false)}
+          title={t('periodStart')}
+        />
+      )}
+      {showEndPicker && (
+        <DatePickerModal
+          visible={showEndPicker}
+          value={pendingEnd}
+          onConfirm={d => { setPendingEnd(d); setShowEndPicker(false); }}
+          onCancel={() => setShowEndPicker(false)}
+          title={t('periodEnd')}
+        />
+      )}
 
       {/* Hero card */}
       <View style={styles.heroCard}>
@@ -322,13 +334,15 @@ export default function TaxPrepaymentScreen() {
               <Pressable style={[styles.input, { justifyContent: 'center' }]} onPress={() => setShowPayDatePicker(true)}>
                 <Text style={{ color: COLORS.text, fontSize: 13 }}>{payDate}</Text>
               </Pressable>
-              <DatePickerModal
-                visible={showPayDatePicker}
-                value={payDate}
-                onConfirm={d => { setPayDate(d); setShowPayDatePicker(false); }}
-                onCancel={() => setShowPayDatePicker(false)}
-                title={t('date')}
-              />
+              {showPayDatePicker && (
+                <DatePickerModal
+                  visible={showPayDatePicker}
+                  value={payDate}
+                  onConfirm={d => { setPayDate(d); setShowPayDatePicker(false); }}
+                  onCancel={() => setShowPayDatePicker(false)}
+                  title={t('date')}
+                />
+              )}
             </View>
           </View>
           <Text style={styles.fieldLabel}>{t('noteReference')}</Text>
@@ -373,9 +387,12 @@ export default function TaxPrepaymentScreen() {
 
       {/* Save Data / Export PDF */}
       <View style={styles.actionRow}>
-        <Pressable style={styles.saveDataBtn} onPress={handleSaveData}>
-          <Feather name="save" size={16} color={COLORS.text} />
-          <Text style={styles.saveDataBtnText}>{t('saveData')}</Text>
+        <Pressable
+          style={({ pressed }) => [styles.saveDataBtn, pressed && { opacity: 0.65 }]}
+          onPress={handleSaveData}
+        >
+          <Feather name={saved ? 'check-circle' : 'save'} size={16} color={saved ? COLORS.success : COLORS.text} />
+          <Text style={[styles.saveDataBtnText, saved && { color: COLORS.success }]}>{t('saveData')}</Text>
         </Pressable>
         <Pressable style={styles.exportPdfBtn} onPress={handleExportPDF}>
           <Feather name="file-text" size={16} color={COLORS.background} />
@@ -409,7 +426,7 @@ const makeStyles = () => StyleSheet.create({
   saveDataBtn: {
     flex: 1, flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'center' as const, gap: 8,
     borderRadius: 14, borderWidth: 1, borderColor: COLORS.border,
-    backgroundColor: COLORS.card, paddingVertical: 15,
+    backgroundColor: COLORS.surface, paddingVertical: 15,
   },
   saveDataBtnText: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   exportPdfBtn: {

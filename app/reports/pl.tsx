@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, ScrollView, StyleSheet, Pressable } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, Pressable, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { getTransactions, getSettings } from '@/lib/storage';
@@ -37,6 +37,7 @@ export default function PLScreen() {
   const [showStartPicker, setShowStartPicker] = useState(false);
   const [showEndPicker, setShowEndPicker] = useState(false);
   const periodDirty = pendingStart !== startDate || pendingEnd !== endDate;
+  const [saved, setSaved] = useState(false);
 
   const load = useCallback(async () => {
     const [tx, s, savedDates] = await Promise.all([
@@ -55,12 +56,19 @@ export default function PLScreen() {
   }, []);
 
   const handleSaveData = useCallback(async () => {
-    setStartDate(pendingStart);
-    setEndDate(pendingEnd);
-    await AsyncStorage.setItem(PL_DATES_KEY, JSON.stringify({ start: pendingStart, end: pendingEnd }));
+    try {
+      setStartDate(pendingStart);
+      setEndDate(pendingEnd);
+      await AsyncStorage.setItem(PL_DATES_KEY, JSON.stringify({ start: pendingStart, end: pendingEnd }));
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      Alert.alert('Error', 'Could not save data.');
+    }
   }, [pendingStart, pendingEnd]);
 
   useEffect(() => { load(); }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const computed = useMemo(() => {
     const s = new Date(startDate);
@@ -152,8 +160,8 @@ export default function PLScreen() {
       contentContainerStyle={[styles.content, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 32 }]}
       showsVerticalScrollIndicator={false}
     >
-        <Pressable style={styles.back} onPress={() => router.back()}>
-          <Feather name="arrow-left" size={18} color={COLORS.primary} />
+        <Pressable style={styles.back} onPress={() => router.back()} hitSlop={10}>
+          <Feather name="arrow-left" size={28} color={COLORS.primary} />
           <Text style={styles.backText}>{t('reports')}</Text>
         </Pressable>
         <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>
@@ -188,20 +196,24 @@ export default function PLScreen() {
           </View>
           <Text style={styles.periodHint}>{t('changesNotSaved')}</Text>
         </View>
-        <DatePickerModal
-          visible={showStartPicker}
-          value={pendingStart}
-          onConfirm={d => { setPendingStart(d); setShowStartPicker(false); }}
-          onCancel={() => setShowStartPicker(false)}
-          title={t('periodStart')}
-        />
-        <DatePickerModal
-          visible={showEndPicker}
-          value={pendingEnd}
-          onConfirm={d => { setPendingEnd(d); setShowEndPicker(false); }}
-          onCancel={() => setShowEndPicker(false)}
-          title={t('periodEnd')}
-        />
+        {showStartPicker && (
+          <DatePickerModal
+            visible={showStartPicker}
+            value={pendingStart}
+            onConfirm={d => { setPendingStart(d); setShowStartPicker(false); }}
+            onCancel={() => setShowStartPicker(false)}
+            title={t('periodStart')}
+          />
+        )}
+        {showEndPicker && (
+          <DatePickerModal
+            visible={showEndPicker}
+            value={pendingEnd}
+            onConfirm={d => { setPendingEnd(d); setShowEndPicker(false); }}
+            onCancel={() => setShowEndPicker(false)}
+            title={t('periodEnd')}
+          />
+        )}
 
         {/* P&L table */}
         <View style={styles.table}>
@@ -245,9 +257,12 @@ export default function PLScreen() {
 
         {/* Save Data / Export PDF */}
         <View style={styles.actionRow}>
-          <Pressable style={styles.saveDataBtn} onPress={handleSaveData}>
-            <Feather name="save" size={16} color={COLORS.text} />
-            <Text style={styles.saveDataBtnText}>{t('saveData')}</Text>
+          <Pressable
+            style={({ pressed }) => [styles.saveDataBtn, pressed && { opacity: 0.65 }]}
+            onPress={handleSaveData}
+          >
+            <Feather name={saved ? 'check-circle' : 'save'} size={16} color={saved ? COLORS.success : COLORS.text} />
+            <Text style={[styles.saveDataBtnText, saved && { color: COLORS.success }]}>{t('saveData')}</Text>
           </Pressable>
           <Pressable style={styles.exportPdfBtn} onPress={handleExportPDF}>
             <Feather name="file-text" size={16} color={COLORS.background} />
@@ -284,7 +299,7 @@ const makeStyles = () => StyleSheet.create({
   saveDataBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     borderRadius: 14, borderWidth: 1, borderColor: COLORS.border,
-    backgroundColor: COLORS.card, paddingVertical: 15,
+    backgroundColor: COLORS.surface, paddingVertical: 15,
   },
   saveDataBtnText: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   exportPdfBtn: {

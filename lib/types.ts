@@ -12,6 +12,7 @@ export interface Transaction {
   clientName?: string;
   status?: 'paid' | 'unpaid';
   note?: string;
+  receipt_url?: string;
 }
 
 export interface InvoiceLineItem {

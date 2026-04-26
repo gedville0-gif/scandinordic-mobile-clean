@@ -19,6 +19,9 @@ import { useLocalSearchParams } from 'expo-router';
 import { useAppDialog } from '@/components/AppDialog';
 import { useTheme } from '@/contexts/ThemeContext';
 import DatePickerModal from '@/components/DatePickerModal';
+import { supabase } from '@/lib/supabase';
+import { decode } from 'base64-arraybuffer';
+import * as FileSystem from 'expo-file-system/legacy';
 
 // ─── Dynamic imports (graceful degradation) ──────────────────────────────────
 
@@ -28,6 +31,8 @@ let Papa: any = null;
 try { ImagePicker = require('expo-image-picker'); } catch {}
 try { DocumentPicker = require('expo-document-picker'); } catch {}
 try { Papa = require('papaparse'); } catch {}
+
+import { scanWithGoogleVision, type OCRResult } from '@/src/services/googleVisionOCR';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -101,6 +106,7 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
   const modalStyles = makeModalStyles();
   const insets = useSafeAreaInsets();
   const { mode } = useTheme();
+  const { show: showDialog, dialog } = useAppDialog();
   const color = type === 'income' ? COLORS.success : COLORS.danger;
 
   const [desc, setDesc] = useState('');
@@ -139,10 +145,10 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
 
   const handleSave = () => {
     if (!desc.trim() || !amount) {
-      Alert.alert('Missing fields', 'Please fill in title and amount.');
+      showDialog('Missing fields', 'Please fill in title and amount.');
       return;
     }
-    if (isNaN(amt) || amt <= 0) { Alert.alert('Invalid amount'); return; }
+    if (isNaN(amt) || amt <= 0) { showDialog('Invalid amount'); return; }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     onSave({
       id: generateId(),
@@ -359,6 +365,7 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
           </View>
         </Modal>
 
+      {dialog}
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -369,42 +376,115 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
 interface ReceiptReviewModalProps {
   visible: boolean;
   imageUri: string | null;
+  imageBase64?: string;
   onClose: () => void;
   onSave: (tx: Transaction) => void;
   t: (k: string) => string;
 }
 
-function ReceiptReviewModal({ visible, imageUri, onClose, onSave, t }: ReceiptReviewModalProps) {
+function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t }: ReceiptReviewModalProps) {
   const modalStyles = makeModalStyles();
   const insets = useSafeAreaInsets();
   const { mode } = useTheme();
+  const { show: showDialog, dialog } = useAppDialog();
   const [desc, setDesc] = useState('');
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('other');
   const [vatRate, setVatRate] = useState('25.5');
-  const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(new Date());
+  const [showDatePicker, setShowDatePicker] = useState(false);
   const [note, setNote] = useState('');
   const [showCatSheet, setShowCatSheet] = useState(false);
   const [catSearch, setCatSearch] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [customInputText, setCustomInputText] = useState('');
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
+  const [confidence, setConfidence] = useState<number | null>(null);
 
+  // Reset all fields when modal opens
   useEffect(() => {
     if (visible) {
       setDesc(''); setAmount(''); setCategory('other');
-      setVatRate('25.5'); setDate(new Date().toISOString().split('T')[0]); setNote('');
+      setVatRate('25.5'); setSelectedDate(new Date()); setShowDatePicker(false); setNote('');
       setShowCatSheet(false); setCatSearch('');
       setShowCustomInput(false); setCustomInputText('');
+      setScanning(false); setScanError(null); setConfidence(null);
     }
   }, [visible]);
 
-  const handleSave = () => {
-    if (!desc.trim() || !amount) { Alert.alert(t('missingFields'), t('fillTitleAmount')); return; }
+  // Auto-scan whenever a new imageUri arrives
+  useEffect(() => {
+    if (!imageUri || !visible) return;
+    let cancelled = false;
+
+    setScanning(true);
+    setScanError(null);
+    setConfidence(null);
+
+    scanWithGoogleVision(imageUri, imageBase64)
+      .then((result: any) => {
+        if (cancelled) return;
+
+        console.log('📋 OCR result keys:', Object.keys(result || {}));
+
+        const merchant = result?.merchant ?? result?.vendor ?? result?.store ?? '';
+        const amount   = result?.net_amount ?? result?.amount ?? result?.total ?? null;
+        const date     = result?.date ?? null;
+
+        console.log('📋 merchant:', merchant, 'amount:', amount, 'date:', date);
+
+        setDesc(String(merchant));
+        setAmount(amount !== null && amount !== undefined ? String(amount) : '');
+        if (date) {
+          try { setSelectedDate(new Date(date + 'T12:00:00')); } catch (e) {}
+        }
+        if (result?.vat_rate !== null && result?.vat_rate !== undefined) setVatRate(String(result.vat_rate));
+        if (result?.category && result.category !== 'other') setCategory(result.category);
+        setConfidence(result?.confidence ?? null);
+      })
+      .catch((err: Error) => {
+        if (cancelled) return;
+        setScanError(err.message ?? 'OCR failed');
+      })
+      .finally(() => {
+        if (!cancelled) setScanning(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [imageUri, visible]);
+
+  const handleSave = async () => {
+    if (!desc.trim() || !amount) { showDialog(t('missingFields'), t('fillTitleAmount')); return; }
     const amt = parseFloat(amount.replace(',', '.'));
-    if (isNaN(amt) || amt <= 0) { Alert.alert(t('invalidAmount') || 'Invalid amount'); return; }
+    if (isNaN(amt) || amt <= 0) { showDialog(t('invalidAmount') || 'Invalid amount'); return; }
     const vp = parseFloat(vatRate) || 0;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, date, vatRate: vp, note: note || undefined });
+    const dateStr = selectedDate.toISOString().split('T')[0];
+
+    // Upload receipt image to Supabase Storage
+    let receipt_url: string | undefined;
+    if (imageUri) {
+      try {
+        const base64 = await FileSystem.readAsStringAsync(imageUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        const filename = `receipts/${Date.now()}.jpg`;
+        const { error: uploadError } = await supabase.storage
+          .from('receipts')
+          .upload(filename, decode(base64), { contentType: 'image/jpeg' });
+        if (!uploadError) {
+          const { data: urlData } = supabase.storage.from('receipts').getPublicUrl(filename);
+          receipt_url = urlData?.publicUrl;
+        } else {
+          console.log('⚠️ Receipt upload failed:', uploadError.message);
+        }
+      } catch (e: any) {
+        console.log('⚠️ Receipt upload error:', e?.message);
+      }
+    }
+
+    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, date: dateStr, vatRate: vp, note: note || undefined, receipt_url });
     onClose();
   };
 
@@ -417,18 +497,60 @@ function ReceiptReviewModal({ visible, imageUri, onClose, onSave, t }: ReceiptRe
           <Pressable onPress={handleSave}><Text style={[modalStyles.save, { color: COLORS.danger }]}>{t('save')}</Text></Pressable>
         </View>
         <ScrollView style={modalStyles.body} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          {/* Receipt image + scanning overlay */}
           {imageUri && (
             <View style={{ borderRadius: 12, overflow: 'hidden', marginBottom: 14, height: 200, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border }}>
               <Image source={{ uri: imageUri }} style={{ width: '100%', height: '100%' }} resizeMode="contain" />
+              {scanning && (
+                <View style={{ ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.55)', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+                  <ActivityIndicator color={COLORS.primary} size="large" />
+                  <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600', letterSpacing: 0.5 }}>
+                    {t('scanningReceipt') || 'Skannataan kuitti…'}
+                  </Text>
+                </View>
+              )}
             </View>
           )}
 
-          <View style={{ backgroundColor: COLORS.warningDim, borderRadius: 10, padding: 10, marginBottom: 14, flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-            <Feather name="info" size={14} color={COLORS.warning} />
-            <Text style={{ color: COLORS.warning, fontSize: 12, flex: 1, lineHeight: 17 }}>
-              {t('reviewReceiptHint')}
-            </Text>
-          </View>
+          {/* OCR confidence badge */}
+          {confidence !== null && !scanning && (
+            <View style={{
+              flexDirection: 'row', alignItems: 'center', gap: 6,
+              backgroundColor: confidence > 0.8 ? COLORS.successDim ?? (COLORS.success + '18') : COLORS.warningDim,
+              borderRadius: 10, padding: 10, marginBottom: 8,
+            }}>
+              <Feather
+                name={confidence > 0.8 ? 'check-circle' : 'alert-triangle'}
+                size={14}
+                color={confidence > 0.8 ? COLORS.success : COLORS.warning}
+              />
+              <Text style={{ color: confidence > 0.8 ? COLORS.success : COLORS.warning, fontSize: 12, fontWeight: '600', flex: 1 }}>
+                {confidence > 0.8
+                  ? (t('ocrHighConfidence') || `✅ Tunnistettu (${Math.round(confidence * 100)}%) — tarkista tiedot`)
+                  : (t('ocrLowConfidence') || `⚠️ Matala luotettavuus (${Math.round(confidence * 100)}%) — täytä puuttuvat kentät`)}
+              </Text>
+            </View>
+          )}
+
+          {/* OCR error */}
+          {scanError && !scanning && (
+            <View style={{ backgroundColor: COLORS.dangerDim ?? (COLORS.danger + '18'), borderRadius: 10, padding: 10, marginBottom: 8, flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <Feather name="x-circle" size={14} color={COLORS.danger} />
+              <Text style={{ color: COLORS.danger, fontSize: 12, flex: 1 }}>
+                {t('ocrFailed') || 'Skannaus epäonnistui — täytä kentät itse'}
+              </Text>
+            </View>
+          )}
+
+          {/* Manual-fill hint (shown when no scan result yet and not scanning) */}
+          {confidence === null && !scanning && !scanError && (
+            <View style={{ backgroundColor: COLORS.warningDim, borderRadius: 10, padding: 10, marginBottom: 14, flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <Feather name="info" size={14} color={COLORS.warning} />
+              <Text style={{ color: COLORS.warning, fontSize: 12, flex: 1, lineHeight: 17 }}>
+                {t('reviewReceiptHint')}
+              </Text>
+            </View>
+          )}
 
           <Text style={modalStyles.label}>{t('vendorDescription')}</Text>
           <TextInput style={modalStyles.input} placeholder="e.g. Kesko, Shell, Amazon" placeholderTextColor={COLORS.muted} value={desc} onChangeText={setDesc} />
@@ -440,7 +562,23 @@ function ReceiptReviewModal({ visible, imageUri, onClose, onSave, t }: ReceiptRe
             </View>
             <View style={modalStyles.colHalf}>
               <Text style={modalStyles.label}>{t('date')}</Text>
-              <TextInput style={modalStyles.input} placeholder="YYYY-MM-DD" placeholderTextColor={COLORS.muted} value={date} onChangeText={setDate} />
+              <Pressable
+                style={[modalStyles.input, { justifyContent: 'center' }]}
+                onPress={() => setShowDatePicker(true)}
+              >
+                <Text style={{ color: COLORS.primary, fontSize: 13, fontWeight: '700' }}>
+                  {selectedDate.toLocaleDateString('fi-FI')}
+                </Text>
+              </Pressable>
+              {showDatePicker && (
+                <DatePickerModal
+                  visible={showDatePicker}
+                  value={selectedDate.toISOString().split('T')[0]}
+                  onConfirm={d => { setSelectedDate(new Date(d + 'T12:00:00')); setShowDatePicker(false); }}
+                  onCancel={() => setShowDatePicker(false)}
+                  title={t('date')}
+                />
+              )}
             </View>
           </View>
 
@@ -555,6 +693,7 @@ function ReceiptReviewModal({ visible, imageUri, onClose, onSave, t }: ReceiptRe
           </View>
         </Modal>
 
+      {dialog}
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -1077,7 +1216,10 @@ export default function EarningsScreen() {
 
   // Receipt review state
   const [reviewUri, setReviewUri] = useState<string | null>(null);
+  const [reviewBase64, setReviewBase64] = useState<string | undefined>(undefined);
   const [showReview, setShowReview] = useState(false);
+  // Fullscreen receipt viewer state
+  const [receiptViewUrl, setReceiptViewUrl] = useState<string | null>(null);
   // CSV import state
   const [showCsv, setShowCsv] = useState(false);
 
@@ -1085,29 +1227,52 @@ export default function EarningsScreen() {
   useEffect(() => {
     if (action === 'scan' || action === 'upload') {
       const openReceiptPicker = async () => {
-        if (!ImagePicker) return;
         if (action === 'scan') {
-          const perm = await ImagePicker.requestCameraPermissionsAsync?.();
-          if (perm && perm.status !== 'granted') return;
-          const result = await ImagePicker.launchCameraAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions?.Images ?? 'images',
-            quality: 0.8,
-          });
-          if (!result.canceled && result.assets?.[0]?.uri) {
-            setReviewUri(result.assets[0].uri);
-            setShowReview(true);
+          if (!ImagePicker) {
+            Alert.alert('Not installed', 'Run in your project:\nnpx expo install expo-image-picker');
+            return;
+          }
+          const perm = await ImagePicker.requestCameraPermissionsAsync();
+          if (!perm.granted) {
+            Alert.alert('Camera access denied', 'Please allow camera access in device Settings.');
+            return;
+          }
+          try {
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 0.8,
+              allowsEditing: false,
+              base64: true,
+            });
+            if (!result.canceled && result.assets?.[0]) {
+              const asset = result.assets[0];
+              if (asset.base64) {
+                console.log('✅ base64 available directly from ImagePicker');
+                setReviewBase64(asset.base64);
+              } else {
+                console.log('⚠️ No base64 on asset. Available properties:', Object.keys(asset));
+                setReviewBase64(undefined);
+              }
+              setReviewUri(asset.uri);
+              setShowReview(true);
+            }
+          } catch (e: any) {
+            Alert.alert('Camera error', e?.message ?? 'Could not open camera.');
           }
         } else {
-          const perm = await ImagePicker.requestMediaLibraryPermissionsAsync?.();
-          if (perm && perm.status !== 'granted') return;
-          const result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions?.Images ?? 'images',
-            quality: 0.8,
+          if (!DocumentPicker) return;
+          const result = await DocumentPicker.getDocumentAsync({
+            type: ['image/jpeg', 'image/png'],
+            copyToCacheDirectory: true,
           });
-          if (!result.canceled && result.assets?.[0]?.uri) {
-            setReviewUri(result.assets[0].uri);
-            setShowReview(true);
+          if (result.canceled) return;
+          const fileUri = result.assets?.[0]?.uri;
+          if (!fileUri) {
+            Alert.alert('Error', 'Could not get file URI');
+            return;
           }
+          setReviewUri(fileUri);
+          setShowReview(true);
         }
       };
       openReceiptPicker();
@@ -1167,9 +1332,18 @@ export default function EarningsScreen() {
         mediaTypes: ['images'],
         quality: 0.8,
         allowsEditing: false,
+        base64: true,
       });
       if (!result.canceled && result.assets?.[0]) {
-        setReviewUri(result.assets[0].uri);
+        const asset = result.assets[0];
+        if (asset.base64) {
+          console.log('✅ base64 available directly from ImagePicker');
+          setReviewBase64(asset.base64);
+        } else {
+          console.log('⚠️ No base64 on asset. Available properties:', Object.keys(asset));
+          setReviewBase64(undefined);
+        }
+        setReviewUri(asset.uri);
         setShowReview(true);
       }
     } catch (e: any) {
@@ -1354,7 +1528,7 @@ export default function EarningsScreen() {
           ) : (
             <View style={styles.list}>
               {filtered.map(tx => (
-                <TransactionItem key={tx.id} item={tx} currency={currency} onPress={() => handleDelete(tx.id)} />
+                <TransactionItem key={tx.id} item={tx} currency={currency} onPress={() => handleDelete(tx.id)} onReceiptPress={tx.receipt_url ? (url) => setReceiptViewUrl(url) : undefined} />
               ))}
             </View>
           )}
@@ -1362,8 +1536,32 @@ export default function EarningsScreen() {
       </ScrollView>
 
       <AddModal visible={showModal} type={activeTab} onClose={() => setShowModal(false)} onSave={handleSave} t={t} />
-      <ReceiptReviewModal visible={showReview} imageUri={reviewUri} onClose={() => { setShowReview(false); setReviewUri(null); }} onSave={handleSave} t={t} />
+      <ReceiptReviewModal visible={showReview} imageUri={reviewUri} imageBase64={reviewBase64} onClose={() => { setShowReview(false); setReviewUri(null); setReviewBase64(undefined); }} onSave={handleSave} t={t} />
       <CsvImportModal visible={showCsv} type={activeTab} onClose={() => setShowCsv(false)} onBulkSave={handleBulkSave} t={t} />
+
+      {/* Fullscreen receipt viewer */}
+      <Modal visible={!!receiptViewUrl} transparent animationType="fade" onRequestClose={() => setReceiptViewUrl(null)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.95)', justifyContent: 'center', alignItems: 'center' }}>
+          <Pressable
+            style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 }}
+            onPress={() => setReceiptViewUrl(null)}
+          />
+          {receiptViewUrl && (
+            <Image
+              source={{ uri: receiptViewUrl }}
+              style={{ width: '92%', height: '80%' }}
+              resizeMode="contain"
+            />
+          )}
+          <Pressable
+            onPress={() => setReceiptViewUrl(null)}
+            style={{ position: 'absolute', top: 54, right: 20, backgroundColor: 'rgba(255,255,255,0.12)', borderRadius: 20, padding: 10 }}
+          >
+            <Feather name="x" size={22} color="#fff" />
+          </Pressable>
+        </View>
+      </Modal>
+
       {dialog}
     </View>
   );

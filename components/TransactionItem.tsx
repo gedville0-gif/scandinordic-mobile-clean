@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, Pressable, StyleSheet } from 'react-native';
+import { View, Text, Pressable, StyleSheet, TouchableOpacity } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/constants/colors';
@@ -11,6 +11,7 @@ interface TransactionItemProps {
   currency: Currency;
   onPress?: (item: Transaction) => void;
   onDelete?: (id: string) => void;
+  onReceiptPress?: (url: string) => void;
 }
 
 const CATEGORY_ICONS: Record<string, string> = {
@@ -25,7 +26,7 @@ const CATEGORY_ICONS: Record<string, string> = {
   Other: 'circle',
 };
 
-export function TransactionItem({ item, currency, onPress, onDelete }: TransactionItemProps) {
+export function TransactionItem({ item, currency, onPress, onDelete, onReceiptPress }: TransactionItemProps) {
   const isIncome = item.type === 'income';
   const color = isIncome ? COLORS.success : COLORS.danger;
   const icon = CATEGORY_ICONS[item.category] || 'circle';
@@ -108,6 +109,15 @@ export function TransactionItem({ item, currency, onPress, onDelete }: Transacti
           <Text style={styles.vat}>VAT {item.vatRate}%</Text>
         ) : null}
       </View>
+      {item.receipt_url && onReceiptPress ? (
+        <TouchableOpacity
+          onPress={() => onReceiptPress(item.receipt_url!)}
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          style={{ paddingLeft: 6 }}
+        >
+          <Text style={{ fontSize: 18 }}>🧾</Text>
+        </TouchableOpacity>
+      ) : null}
     </Pressable>
   );
 }

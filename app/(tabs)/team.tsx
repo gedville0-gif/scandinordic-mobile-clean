@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Alert,
+  ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -24,6 +24,89 @@ import {
 import { businessCategories, getCategoryLabel } from '@/lib/categories';
 import { formatCurrency } from '@/lib/currency';
 import type { Worker, WorkSession, Currency } from '@/lib/types';
+import { supabase } from '@/lib/supabase';
+
+// ─── Payroll types ────────────────────────────────────────────────────────────
+
+interface PayrollEmployee {
+  id: string;
+  name: string;
+  role: string;
+  gross_salary: number;
+  hours_per_month: number;
+  tax_rate_override: number | null;
+}
+
+interface PayrollCalc {
+  gross: number;
+  tyel: number;
+  tvr: number;
+  sv: number;
+  totalEmpDed: number;
+  taxableIncome: number;
+  incomeTax: number;
+  netPay: number;
+  erTyel: number;
+  erTvr: number;
+  erSv: number;
+  totalErCost: number;
+  effectiveTaxRate: number;
+}
+
+// ─── Finnish 2025 payroll rates ───────────────────────────────────────────────
+
+const TYEL_EMP = 0.0745;  // Employee pension
+const TVR_EMP  = 0.0079;  // Employee unemployment
+const SV_EMP   = 0.0153;  // Employee health
+
+const TYEL_ER  = 0.1734;  // Employer pension
+const TVR_ER   = 0.0132;  // Employer unemployment
+const SV_ER    = 0.0153;  // Employer health
+
+const PAYROLL_BRACKETS = [
+  { max: 19900,    rate: 0.1264 },
+  { max: 29700,    rate: 0.19   },
+  { max: 49000,    rate: 0.3025 },
+  { max: 85800,    rate: 0.34   },
+  { max: Infinity, rate: 0.44   },
+];
+
+function progressiveTaxMonthly(annualTaxable: number): number {
+  let tax = 0, prev = 0;
+  for (const b of PAYROLL_BRACKETS) {
+    if (annualTaxable <= prev) break;
+    tax += (Math.min(annualTaxable, b.max) - prev) * b.rate;
+    prev = b.max;
+  }
+  return tax / 12;
+}
+
+function calcPayroll(emp: PayrollEmployee): PayrollCalc {
+  const gross = emp.gross_salary;
+  const tyel  = gross * TYEL_EMP;
+  const tvr   = gross * TVR_EMP;
+  const sv    = gross * SV_EMP;
+  const totalEmpDed = tyel + tvr + sv;
+  const taxableIncome = gross - totalEmpDed;
+
+  let incomeTax: number;
+  let effectiveTaxRate: number;
+  if (emp.tax_rate_override !== null && emp.tax_rate_override !== undefined) {
+    effectiveTaxRate = emp.tax_rate_override / 100;
+    incomeTax = taxableIncome * effectiveTaxRate;
+  } else {
+    incomeTax = progressiveTaxMonthly(taxableIncome * 12);
+    effectiveTaxRate = taxableIncome > 0 ? incomeTax / taxableIncome : 0;
+  }
+
+  const netPay    = taxableIncome - incomeTax;
+  const erTyel    = gross * TYEL_ER;
+  const erTvr     = gross * TVR_ER;
+  const erSv      = gross * SV_ER;
+  const totalErCost = gross + erTyel + erTvr + erSv;
+
+  return { gross, tyel, tvr, sv, totalEmpDed, taxableIncome, incomeTax, netPay, erTyel, erTvr, erSv, totalErCost, effectiveTaxRate };
+}
 
 function formatElapsed(seconds: number): string {
   const h = Math.floor(seconds / 3600);
@@ -69,6 +152,22 @@ export default function TeamScreen() {
   const [showStartTimer, setShowStartTimer] = useState(false);
   const [selectedWorkerForTimer, setSelectedWorkerForTimer] = useState('');
   const [pendingNote, setPendingNote] = useState('');
+
+  // Tab
+  const [activeTab, setActiveTab] = useState<'team' | 'payroll'>('team');
+
+  // Payroll
+  const [payrollEmployees, setPayrollEmployees] = useState<PayrollEmployee[]>([]);
+  const [payrollLoading, setPayrollLoading] = useState(false);
+  const [selectedEmployee, setSelectedEmployee] = useState<PayrollEmployee | null>(null);
+  const [showBreakdown, setShowBreakdown] = useState(false);
+  const [showAddEmployee, setShowAddEmployee] = useState(false);
+  const [editEmployee, setEditEmployee] = useState<PayrollEmployee | null>(null);
+  const [empName, setEmpName] = useState('');
+  const [empRole, setEmpRole] = useState('');
+  const [empGross, setEmpGross] = useState('');
+  const [empHours, setEmpHours] = useState('160');
+  const [empTaxOverride, setEmpTaxOverride] = useState('');
 
   const load = useCallback(async () => {
     const [w, s, settings] = await Promise.all([getWorkers(), getWorkSessions(), getSettings()]);
@@ -154,8 +253,91 @@ export default function TeamScreen() {
       { text: t('cancel'), style: 'cancel' },
       { text: t('delete'), style: 'destructive' },
     ]);
-    if (idx === 1) { await deleteWorker(id); await load(); }
+    if (idx === 1) {
+      if (activeWorkerId === id) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        timerRef.current = null;
+        setActiveWorkerId(null);
+        setTimerStart(null);
+        setElapsed(0);
+        setTimerNote('');
+      }
+      await deleteWorker(id);
+      await load();
+    }
   }
+
+  // ── Payroll CRUD ────────────────────────────────────────────────────────────
+
+  const loadPayroll = useCallback(async () => {
+    setPayrollLoading(true);
+    try {
+      const { data } = await supabase.from('team_payroll').select('*').order('name');
+      setPayrollEmployees(data ?? []);
+    } catch {}
+    finally { setPayrollLoading(false); }
+  }, []);
+
+  useEffect(() => { loadPayroll(); }, [loadPayroll]);
+
+  function openAddEmployee(emp?: PayrollEmployee) {
+    if (emp) {
+      setEditEmployee(emp);
+      setEmpName(emp.name);
+      setEmpRole(emp.role);
+      setEmpGross(String(emp.gross_salary));
+      setEmpHours(String(emp.hours_per_month));
+      setEmpTaxOverride(emp.tax_rate_override !== null ? String(emp.tax_rate_override) : '');
+    } else {
+      setEditEmployee(null);
+      setEmpName(''); setEmpRole(''); setEmpGross(''); setEmpHours('160'); setEmpTaxOverride('');
+    }
+    setShowAddEmployee(true);
+  }
+
+  async function handleSaveEmployee() {
+    const gross = parseFloat(empGross.replace(',', '.'));
+    const hours = parseFloat(empHours) || 160;
+    if (!empName.trim() || isNaN(gross) || gross <= 0) return;
+    const taxOverride = empTaxOverride.trim() !== '' ? parseFloat(empTaxOverride.replace(',', '.')) : null;
+    const payload = {
+      name: empName.trim(),
+      role: empRole.trim(),
+      gross_salary: gross,
+      hours_per_month: hours,
+      tax_rate_override: taxOverride,
+    };
+    try {
+      if (editEmployee) {
+        await supabase.from('team_payroll').update(payload).eq('id', editEmployee.id);
+      } else {
+        await supabase.from('team_payroll').insert({ ...payload, id: Date.now().toString() });
+      }
+      setShowAddEmployee(false);
+      await loadPayroll();
+    } catch (err) {
+      console.error('[payroll] save employee failed:', err);
+    }
+  }
+
+  async function handleDeleteEmployee(id: string) {
+    const idx = await showDialog(t('delete'), t('removeThisWorker'), [
+      { text: t('cancel'), style: 'cancel' },
+      { text: t('delete'), style: 'destructive' },
+    ]);
+    if (idx === 1) {
+      await supabase.from('team_payroll').delete().eq('id', id);
+      setShowBreakdown(false);
+      await loadPayroll();
+    }
+  }
+
+  const payrollSummary = useMemo(() => {
+    const totalGross = payrollEmployees.reduce((s, e) => s + e.gross_salary, 0);
+    const totalNet   = payrollEmployees.reduce((s, e) => s + calcPayroll(e).netPay, 0);
+    const totalCost  = payrollEmployees.reduce((s, e) => s + calcPayroll(e).totalErCost, 0);
+    return { totalGross, totalNet, totalCost, count: payrollEmployees.length };
+  }, [payrollEmployees]);
 
   const filteredCategories = useMemo(() => {
     if (!categorySearch) return businessCategories;
@@ -174,14 +356,129 @@ export default function TeamScreen() {
         {/* Header */}
         <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>
         <View style={styles.headerRow}>
-          <Text style={styles.title}>{t('team')}</Text>
-          <Pressable style={styles.addBtn} onPress={() => setShowAddWorker(true)}>
-            <Feather name="plus" size={15} color={COLORS.background} />
-            <Text style={styles.addBtnText}>{t('addWorker')}</Text>
-          </Pressable>
+          <Text style={styles.title}>{activeTab === 'team' ? t('team') : t('payroll')}</Text>
+          {activeTab === 'team' ? (
+            <Pressable style={styles.addBtn} onPress={() => setShowAddWorker(true)}>
+              <Feather name="plus" size={15} color={COLORS.background} />
+              <Text style={styles.addBtnText}>{t('addWorker')}</Text>
+            </Pressable>
+          ) : (
+            <Pressable style={styles.addBtn} onPress={() => openAddEmployee()}>
+              <Feather name="plus" size={15} color={COLORS.background} />
+              <Text style={styles.addBtnText}>{t('addEmployee')}</Text>
+            </Pressable>
+          )}
         </View>
         <View style={styles.divider} />
 
+        {/* Tab switcher */}
+        <View style={styles.tabRow}>
+          <Pressable
+            style={[styles.tabBtn, activeTab === 'team' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('team')}
+          >
+            <Feather name="users" size={13} color={activeTab === 'team' ? COLORS.primary : COLORS.muted} />
+            <Text style={[styles.tabLabel, activeTab === 'team' && styles.tabLabelActive]}>Team</Text>
+          </Pressable>
+          <Pressable
+            style={[styles.tabBtn, activeTab === 'payroll' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('payroll')}
+          >
+            <Feather name="dollar-sign" size={13} color={activeTab === 'payroll' ? COLORS.primary : COLORS.muted} />
+            <Text style={[styles.tabLabel, activeTab === 'payroll' && styles.tabLabelActive]}>{t('payroll')}</Text>
+          </Pressable>
+        </View>
+
+        {/* ── PAYROLL TAB ─────────────────────────────────────────────────── */}
+        {activeTab === 'payroll' && (
+          <>
+            {payrollLoading ? (
+              <ActivityIndicator color={COLORS.primary} style={{ marginTop: 24 }} />
+            ) : (
+              <>
+                {/* Summary card */}
+                {payrollEmployees.length > 0 && (
+                  <View style={styles.payrollSummaryCard}>
+                    <View style={styles.payrollSummaryItem}>
+                      <Text style={styles.payrollSummaryLabel}>{t('employeeCount')}</Text>
+                      <Text style={styles.payrollSummaryValue}>{payrollSummary.count}</Text>
+                    </View>
+                    <View style={styles.payrollSummarySep} />
+                    <View style={styles.payrollSummaryItem}>
+                      <Text style={styles.payrollSummaryLabel}>{t('totalNetPay')}</Text>
+                      <Text style={[styles.payrollSummaryValue, { color: COLORS.success }]}>{formatCurrency(payrollSummary.totalNet, currency)}</Text>
+                    </View>
+                    <View style={styles.payrollSummarySep} />
+                    <View style={styles.payrollSummaryItem}>
+                      <Text style={styles.payrollSummaryLabel}>{t('totalCost')}</Text>
+                      <Text style={[styles.payrollSummaryValue, { color: COLORS.danger }]}>{formatCurrency(payrollSummary.totalCost, currency)}</Text>
+                    </View>
+                  </View>
+                )}
+
+                {/* Employee list */}
+                {payrollEmployees.length === 0 ? (
+                  <View style={styles.emptyCard}>
+                    <Feather name="briefcase" size={32} color={COLORS.muted} />
+                    <Text style={styles.emptyTitle}>{t('noEmployeesYet')}</Text>
+                    <Text style={styles.emptyDesc}>{t('addEmployeeToStart')}</Text>
+                    <Pressable style={styles.emptyAddBtn} onPress={() => openAddEmployee()}>
+                      <Text style={styles.emptyAddBtnText}>{t('addEmployee')}</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  payrollEmployees.map(emp => {
+                    const c = calcPayroll(emp);
+                    return (
+                      <Pressable
+                        key={emp.id}
+                        style={({ pressed }) => [styles.payrollCard, pressed && { opacity: 0.8 }]}
+                        onPress={() => { setSelectedEmployee(emp); setShowBreakdown(true); }}
+                      >
+                        <View style={styles.payrollCardTop}>
+                          <View style={styles.workerAvatar}>
+                            <Text style={styles.workerAvatarText}>{emp.name.charAt(0).toUpperCase()}</Text>
+                          </View>
+                          <View style={{ flex: 1 }}>
+                            <Text style={styles.workerName}>{emp.name}</Text>
+                            <Text style={styles.workerCategory}>{emp.role || '—'}</Text>
+                          </View>
+                          <Feather name="chevron-right" size={14} color={COLORS.muted} />
+                        </View>
+                        <View style={styles.payrollCardStats}>
+                          <View style={styles.payrollStat}>
+                            <Text style={styles.payrollStatLabel}>{t('gross')}</Text>
+                            <Text style={styles.payrollStatValue}>{formatCurrency(c.gross, currency)}</Text>
+                          </View>
+                          <View style={styles.payrollStat}>
+                            <Text style={styles.payrollStatLabel}>{t('netPay')}</Text>
+                            <Text style={[styles.payrollStatValue, { color: COLORS.success }]}>{formatCurrency(c.netPay, currency)}</Text>
+                          </View>
+                          <View style={styles.payrollStat}>
+                            <Text style={styles.payrollStatLabel}>{t('employerCost')}</Text>
+                            <Text style={[styles.payrollStatValue, { color: COLORS.danger }]}>{formatCurrency(c.totalErCost, currency)}</Text>
+                          </View>
+                        </View>
+                      </Pressable>
+                    );
+                  })
+                )}
+
+                {/* Rates note */}
+                {payrollEmployees.length > 0 && (
+                  <Text style={styles.payrollNote}>
+                    Finnish 2025 rates · TyEL 7.45% · TVR 0.79% · SV 1.53% (employee){'\n'}
+                    Employer: TyEL 17.34% · TVR 1.32% · SV 1.53% · Progressive income tax
+                  </Text>
+                )}
+              </>
+            )}
+          </>
+        )}
+
+        {/* ── TEAM TAB ────────────────────────────────────────────────────── */}
+        {activeTab === 'team' && (
+          <>
         {/* Timer Card */}
         {activeWorkerId ? (
           <View style={[styles.timerCard, styles.timerCardActive]}>
@@ -201,7 +498,7 @@ export default function TeamScreen() {
             style={styles.startTimerCard}
             onPress={() => {
               if (workers.length === 0) {
-                Alert.alert('No Workers', 'Add a worker first before starting a timer.');
+                showDialog(t('noWorkers'), t('addFirstWorker'));
                 return;
               }
               setShowStartTimer(true);
@@ -290,6 +587,8 @@ export default function TeamScreen() {
                 );
               })}
             </View>
+          </>
+        )}
           </>
         )}
       </ScrollView>
@@ -400,6 +699,140 @@ export default function TeamScreen() {
           </ScrollView>
         </View>
       </Modal>
+      {/* Add / Edit Employee Modal */}
+      {showAddEmployee && (
+        <Modal visible={showAddEmployee} animationType="slide" presentationStyle="pageSheet">
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, backgroundColor: COLORS.background }}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{editEmployee ? t('editEmployee') : t('addEmployee')}</Text>
+              <Pressable onPress={() => setShowAddEmployee(false)}>
+                <Feather name="x" size={22} color={COLORS.text} />
+              </Pressable>
+            </View>
+            <ScrollView contentContainerStyle={styles.modalContent}>
+              <Text style={styles.fieldLabel}>{t('fullName')}</Text>
+              <TextInput style={styles.input} value={empName} onChangeText={setEmpName} placeholder="e.g. Mikael Virtanen" placeholderTextColor={COLORS.muted} autoFocus />
+
+              <Text style={[styles.fieldLabel, { marginTop: 16 }]}>{t('roleTitle')}</Text>
+              <TextInput style={styles.input} value={empRole} onChangeText={setEmpRole} placeholder="e.g. Developer" placeholderTextColor={COLORS.muted} />
+
+              <Text style={[styles.fieldLabel, { marginTop: 16 }]}>{t('grossMonthlySalary')} ({currency})</Text>
+              <TextInput style={styles.input} value={empGross} onChangeText={setEmpGross} placeholder="3500.00" placeholderTextColor={COLORS.muted} keyboardType="decimal-pad" />
+
+              <Text style={[styles.fieldLabel, { marginTop: 16 }]}>{t('hoursPerMonth')}</Text>
+              <TextInput style={styles.input} value={empHours} onChangeText={setEmpHours} placeholder="160" placeholderTextColor={COLORS.muted} keyboardType="decimal-pad" />
+
+              <Text style={[styles.fieldLabel, { marginTop: 16 }]}>{t('taxRateOverride')} <Text style={{ color: COLORS.muted, textTransform: 'none' }}>({t('taxRateOverrideHint')})</Text></Text>
+              <TextInput style={styles.input} value={empTaxOverride} onChangeText={setEmpTaxOverride} placeholder="e.g. 28" placeholderTextColor={COLORS.muted} keyboardType="decimal-pad" />
+
+              <Pressable
+                style={[styles.saveBtn, (!empName.trim() || !empGross) && { opacity: 0.4 }]}
+                onPress={handleSaveEmployee}
+                disabled={!empName.trim() || !empGross}
+              >
+                <Text style={styles.saveBtnText}>{editEmployee ? t('update') : t('addEmployee')}</Text>
+              </Pressable>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </Modal>
+      )}
+
+      {/* Payroll Breakdown Modal */}
+      {showBreakdown && selectedEmployee && (() => {
+        const c = calcPayroll(selectedEmployee);
+        const fmt = (v: number) => formatCurrency(v, currency);
+        const pct = (v: number) => `${(v * 100).toFixed(2)}%`;
+        return (
+          <Modal visible={showBreakdown} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowBreakdown(false)}>
+            <View style={{ flex: 1, backgroundColor: COLORS.background }}>
+              <View style={styles.modalHeader}>
+                <View>
+                  <Text style={styles.modalTitle}>{selectedEmployee.name}</Text>
+                  {selectedEmployee.role ? <Text style={styles.workerCategory}>{selectedEmployee.role}</Text> : null}
+                </View>
+                <View style={{ flexDirection: 'row', gap: 14, alignItems: 'center' }}>
+                  <Pressable onPress={() => { setShowBreakdown(false); openAddEmployee(selectedEmployee); }} hitSlop={8}>
+                    <Feather name="edit-2" size={18} color={COLORS.primary} />
+                  </Pressable>
+                  <Pressable onPress={() => handleDeleteEmployee(selectedEmployee.id)} hitSlop={8}>
+                    <Feather name="trash-2" size={18} color={COLORS.danger} />
+                  </Pressable>
+                  <Pressable onPress={() => setShowBreakdown(false)} hitSlop={8}>
+                    <Feather name="x" size={22} color={COLORS.text} />
+                  </Pressable>
+                </View>
+              </View>
+              <ScrollView contentContainerStyle={[styles.modalContent, { gap: 16 }]}>
+
+                {/* Employee side */}
+                <View style={styles.breakdownCard}>
+                  <Text style={styles.breakdownCardTitle}>{t('employeeDeductions')}</Text>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>{t('grossSalary')}</Text>
+                    <Text style={styles.breakdownValue}>{fmt(c.gross)}</Text>
+                  </View>
+                  <View style={[styles.breakdownRow, { borderTopWidth: 1, borderTopColor: COLORS.border }]}>
+                    <Text style={styles.breakdownLabel}>TyEL Pension ({pct(TYEL_EMP)})</Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.danger }]}>−{fmt(c.tyel)}</Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>TVR Unemployment ({pct(TVR_EMP)})</Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.danger }]}>−{fmt(c.tvr)}</Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>SV Health Ins. ({pct(SV_EMP)})</Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.danger }]}>−{fmt(c.sv)}</Text>
+                  </View>
+                  <View style={[styles.breakdownRow, { borderTopWidth: 1, borderTopColor: COLORS.border }]}>
+                    <Text style={[styles.breakdownLabel, { color: COLORS.muted }]}>{t('taxableIncome')}</Text>
+                    <Text style={styles.breakdownValue}>{fmt(c.taxableIncome)}</Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>
+                      Income Tax {selectedEmployee.tax_rate_override !== null ? `(${selectedEmployee.tax_rate_override}% override)` : `(${pct(c.effectiveTaxRate)} eff.)`}
+                    </Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.danger }]}>−{fmt(c.incomeTax)}</Text>
+                  </View>
+                  <View style={[styles.breakdownRow, styles.breakdownTotal]}>
+                    <Text style={styles.breakdownTotalLabel}>{t('netPay')}</Text>
+                    <Text style={[styles.breakdownTotalValue, { color: COLORS.success }]}>{fmt(c.netPay)}</Text>
+                  </View>
+                </View>
+
+                {/* Employer side */}
+                <View style={styles.breakdownCard}>
+                  <Text style={styles.breakdownCardTitle}>{t('employerContributions')}</Text>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>{t('grossSalary')}</Text>
+                    <Text style={styles.breakdownValue}>{fmt(c.gross)}</Text>
+                  </View>
+                  <View style={[styles.breakdownRow, { borderTopWidth: 1, borderTopColor: COLORS.border }]}>
+                    <Text style={styles.breakdownLabel}>TyEL Pension ({pct(TYEL_ER)})</Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.warning }]}>+{fmt(c.erTyel)}</Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>TVR Unemployment ({pct(TVR_ER)})</Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.warning }]}>+{fmt(c.erTvr)}</Text>
+                  </View>
+                  <View style={styles.breakdownRow}>
+                    <Text style={styles.breakdownLabel}>SV Health Ins. ({pct(SV_ER)})</Text>
+                    <Text style={[styles.breakdownValue, { color: COLORS.warning }]}>+{fmt(c.erSv)}</Text>
+                  </View>
+                  <View style={[styles.breakdownRow, styles.breakdownTotal]}>
+                    <Text style={styles.breakdownTotalLabel}>{t('totalEmployerCost')}</Text>
+                    <Text style={[styles.breakdownTotalValue, { color: COLORS.danger }]}>{fmt(c.totalErCost)}</Text>
+                  </View>
+                </View>
+
+                <Text style={styles.payrollNote}>
+                  Finnish 2025 statutory rates. Income tax uses progressive brackets unless overridden.
+                </Text>
+              </ScrollView>
+            </View>
+          </Modal>
+        );
+      })()}
+
       {dialog}
     </View>
   );
@@ -478,4 +911,36 @@ const makeStyles = () => StyleSheet.create({
   catRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: COLORS.card, borderRadius: 10, padding: 14, borderWidth: 1, borderColor: COLORS.border, marginBottom: 6 },
   catRowActive: { borderColor: COLORS.primary + '60', backgroundColor: COLORS.primary + '10' },
   catRowText: { fontSize: 14, color: COLORS.text, fontWeight: '500' },
+
+  // ── Tab switcher ────────────────────────────────────────────────────────────
+  tabRow: { flexDirection: 'row', backgroundColor: COLORS.cardElevated, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, padding: 3, gap: 3 },
+  tabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 8, borderRadius: 9 },
+  tabBtnActive: { backgroundColor: COLORS.primary + '18', borderWidth: 1, borderColor: COLORS.primary + '40' },
+  tabLabel: { fontSize: 12, fontWeight: '600', color: COLORS.muted },
+  tabLabelActive: { color: COLORS.primary },
+
+  // ── Payroll ─────────────────────────────────────────────────────────────────
+  payrollSummaryCard: { backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, padding: 14, flexDirection: 'row', alignItems: 'center' },
+  payrollSummaryItem: { flex: 1, alignItems: 'center', gap: 3 },
+  payrollSummarySep: { width: 1, height: 36, backgroundColor: COLORS.border },
+  payrollSummaryLabel: { fontSize: 9, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '600' },
+  payrollSummaryValue: { fontSize: 14, fontWeight: '700', color: COLORS.text, letterSpacing: -0.3 },
+
+  payrollCard: { backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, padding: 14, gap: 10 },
+  payrollCardTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  payrollCardStats: { flexDirection: 'row', gap: 0, borderTopWidth: 1, borderTopColor: COLORS.border, paddingTop: 10 },
+  payrollStat: { flex: 1, alignItems: 'center', gap: 3 },
+  payrollStatLabel: { fontSize: 9, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '600' },
+  payrollStatValue: { fontSize: 13, fontWeight: '700', color: COLORS.text, letterSpacing: -0.3 },
+  payrollNote: { fontSize: 10, color: COLORS.muted, lineHeight: 15, textAlign: 'center' },
+
+  // ── Breakdown modal ──────────────────────────────────────────────────────────
+  breakdownCard: { backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
+  breakdownCardTitle: { fontSize: 9, color: COLORS.primary, textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: '700', padding: 12, paddingBottom: 10 },
+  breakdownRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 9 },
+  breakdownLabel: { fontSize: 12, color: COLORS.textSecondary, flex: 1 },
+  breakdownValue: { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  breakdownTotal: { backgroundColor: COLORS.surface, borderTopWidth: 1, borderTopColor: COLORS.border },
+  breakdownTotalLabel: { fontSize: 12, fontWeight: '700', color: COLORS.text, flex: 1 },
+  breakdownTotalValue: { fontSize: 15, fontWeight: '700', letterSpacing: -0.3 },
 });

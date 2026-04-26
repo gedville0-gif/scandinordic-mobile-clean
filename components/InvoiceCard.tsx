@@ -12,9 +12,10 @@ interface InvoiceCardProps {
   currency: Currency;
   onPress?: (inv: Invoice) => void;
   onPdfPress?: (inv: Invoice) => void;
+  onDownloadPress?: (inv: Invoice) => void;
 }
 
-export function InvoiceCard({ invoice, currency, onPress, onPdfPress }: InvoiceCardProps) {
+export function InvoiceCard({ invoice, currency, onPress, onPdfPress, onDownloadPress }: InvoiceCardProps) {
   const { t } = useLanguage();
 
   const STATUS_COLORS: Record<Invoice['status'], string> = {
@@ -109,6 +110,10 @@ export function InvoiceCard({ invoice, currency, onPress, onPdfPress }: InvoiceC
       color: COLORS.primary,
       letterSpacing: -0.5,
     },
+    actionBtns: {
+      flexDirection: 'row',
+      gap: 6,
+    },
     pdfBtn: {
       width: 34,
       height: 34,
@@ -153,15 +158,24 @@ export function InvoiceCard({ invoice, currency, onPress, onPdfPress }: InvoiceC
           <Text style={styles.metaLabel}>{t('totalInclVat')}</Text>
           <Text style={styles.totalAmount}>{formatCurrency(invoice.totalAmount, currency)}</Text>
         </View>
-        {onPdfPress && (
+        <View style={styles.actionBtns}>
+          {onPdfPress && (
+            <Pressable
+              onPress={() => { Haptics.selectionAsync(); onPdfPress(invoice); }}
+              style={styles.pdfBtn}
+              hitSlop={8}
+            >
+              <Feather name="share" size={16} color={COLORS.primary} />
+            </Pressable>
+          )}
           <Pressable
-            onPress={() => { Haptics.selectionAsync(); onPdfPress(invoice); }}
+            onPress={() => { Haptics.selectionAsync(); onDownloadPress?.(invoice); }}
             style={styles.pdfBtn}
             hitSlop={8}
           >
-            <Feather name="share" size={16} color={COLORS.primary} />
+            <Feather name="download" size={16} color={COLORS.primary} />
           </Pressable>
-        )}
+        </View>
       </View>
     </Pressable>
   );

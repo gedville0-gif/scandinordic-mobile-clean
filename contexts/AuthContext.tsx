@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import * as WebBrowser from 'expo-web-browser';
-import * as Linking from 'expo-linking';
+import { makeRedirectUri } from 'expo-auth-session';
+import { router } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
 import type { User, Session } from '@supabase/supabase-js';
 
@@ -42,10 +44,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setLoading(false);
       });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
+      if (event === 'SIGNED_OUT') {
+        router.replace('/(auth)/login');
+      }
     });
 
     return () => {
@@ -66,22 +71,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signOut = async () => {
     await supabase.auth.signOut();
+    await AsyncStorage.removeItem('supabase.auth.token');
     setUser(null);
     setSession(null);
   };
 
   const signInWithGoogle = async () => {
-    const redirectUrl = Linking.createURL('/');
+    const redirectTo = makeRedirectUri({ scheme: 'scandinordic' });
     const { data, error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: redirectUrl,
+        redirectTo,
         skipBrowserRedirect: true,
       },
     });
     if (error) throw error;
     if (data.url) {
-      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectUrl);
+      const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
       if (result.type === 'success' && result.url) {
         const match = result.url.match(/[?&]code=([^&]+)/);
         const code = match ? decodeURIComponent(match[1]) : null;

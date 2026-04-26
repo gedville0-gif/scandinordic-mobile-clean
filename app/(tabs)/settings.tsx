@@ -7,6 +7,7 @@ import {
   Pressable,
   Switch,
   TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -48,6 +49,7 @@ export default function SettingsScreen() {
   const [draft, setDraft] = useState<Settings | null>(null);
   const [companyOpen, setCompanyOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(true);
+  const [signingOut, setSigningOut] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [curOpen, setCurOpen] = useState(false);
 
@@ -83,7 +85,12 @@ export default function SettingsScreen() {
     );
     if (idx === 1) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      await signOut();
+      setSigningOut(true);
+      try {
+        await signOut();
+      } finally {
+        setSigningOut(false);
+      }
     }
   };
 
@@ -327,8 +334,11 @@ export default function SettingsScreen() {
         <Pressable
           style={({ pressed }) => [styles.signOutBtn, pressed && { opacity: 0.85 }]}
           onPress={handleSignOut}
+          disabled={signingOut}
         >
-          <Text style={styles.signOutBtnText}>{t('signOut')}</Text>
+          {signingOut
+            ? <ActivityIndicator size="small" color={COLORS.danger} />
+            : <Text style={styles.signOutBtnText}>{t('signOut')}</Text>}
         </Pressable>
       </View>
 

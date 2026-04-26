@@ -6,6 +6,7 @@ import {
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
+import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useAuth } from '@/contexts/AuthContext';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -29,6 +30,7 @@ export default function LoginScreen() {
     try {
       if (isSignUp) await signUp(email.trim(), password);
       else await signIn(email.trim(), password);
+      router.replace('/(tabs)');
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Authentication failed');
     } finally {
@@ -39,9 +41,14 @@ export default function LoginScreen() {
   const handleGoogle = async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setSocialLoading('google');
-    try { await signInWithGoogle(); }
-    catch (err: any) { Alert.alert('Error', err.message || 'Google sign-in failed'); }
-    finally { setSocialLoading(null); }
+    try {
+      await signInWithGoogle();
+      router.replace('/(tabs)');
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Google sign-in failed');
+    } finally {
+      setSocialLoading(null);
+    }
   };
 
   const handleApple = async () => {

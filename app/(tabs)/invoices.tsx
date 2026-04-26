@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Pressable, TextInput, Modal,
-  Alert, RefreshControl, KeyboardAvoidingView, Platform, Switch,
+  RefreshControl, KeyboardAvoidingView, Platform, Switch,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -13,6 +13,7 @@ import type { Invoice, InvoiceLineItem, Settings, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { formatCurrency } from '@/lib/currency';
 import { useAppDialog } from '@/components/AppDialog';
+import DatePickerModal from '@/components/DatePickerModal';
 
 const VAT_PRESETS = [0, 13.5, 14, 25.5];
 const PAYMENT_TERMS = ['Due on Receipt', 'Net 7', 'Net 14', 'Net 30'];
@@ -20,8 +21,10 @@ const PAYMENT_TERMS = ['Due on Receipt', 'Net 7', 'Net 14', 'Net 30'];
 // ─── Dynamic imports (PDF) ────────────────────────────────────────────────────
 let Print: any = null;
 let Sharing: any = null;
+let FileSystem: any = null;
 try { Print = require('expo-print'); } catch {}
 try { Sharing = require('expo-sharing'); } catch {}
+try { FileSystem = require('expo-file-system/legacy'); } catch {}
 
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
@@ -201,90 +204,96 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
 <html>
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=794">
 <title>${pdfT('invoiceTitle')} ${invoiceNumber}</title>
 <style>
 /* Colour palette mirrors web generatePdf.ts:
    DARK #16161e · GOLD #af9137 · GREY #6e6e78 · LIGHT #faf8f4 · TAUPE #f6f2e8 · LTGRAY #eaeaf0 */
+@page { size: A4; margin: 0; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: Helvetica, Arial, sans-serif; color: #16161e; padding: 32px 36px; font-size: 11px; line-height: 1.5; background: #fff; }
+html { width: 794px; height: 1123px; margin: 0; padding: 0; }
+body { margin: 0; padding: 0; background: #fff; }
+#page { font-family: Helvetica, Arial, sans-serif; color: #16161e; width: 794px; height: 1123px; margin: 0; padding: 36px; box-sizing: border-box; display: flex; flex-direction: column; font-size: 12px; line-height: 1.5; -webkit-print-color-adjust: exact; }
+.spacer { flex: 1; }
 
 /* ── Header: three-column flex so title is truly centered, number top-right ─ */
 .header { display: flex; align-items: flex-start; margin-bottom: 10px; }
 .hdr-left { flex: 1; }
 .hdr-center { flex: 0; white-space: nowrap; }
-.inv-title { font-size: 30px; font-weight: 700; color: #16161e; letter-spacing: -0.5px; line-height: 1; }
+.inv-title { font-size: 26px; font-weight: 700; color: #16161e; letter-spacing: -0.5px; line-height: 1; }
 .hdr-right { flex: 1; text-align: right; }
-.inv-num-lbl { font-size: 8.5px; color: #6e6e78; margin-top: 6px; }
+.inv-num-lbl { font-size: 10px; color: #6e6e78; margin-top: 6px; }
 .gold-rule { height: 1px; background: #af9137; opacity: 0.65; margin: 12px 0 18px; }
 
 /* ── FROM / BILL TO: plain two-column text (no card bg — mirrors web layout) ─ */
-.parties { display: flex; gap: 0; margin-bottom: 16px; }
-.party { flex: 1; padding-right: 16px; }
+.parties { display: table; width: 100%; margin-bottom: 24px; }
+.party { display: table-cell; width: 50%; vertical-align: top; padding-right: 16px; }
 .party:last-child { padding-right: 0; padding-left: 16px; border-left: 1px solid #eaeaf0; }
-.p-lbl { font-size: 6.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; margin-bottom: 5px; }
-.p-name { font-size: 10px; font-weight: 700; color: #16161e; margin-bottom: 2px; }
-.p-meta { font-size: 8px; color: #6e6e78; margin-bottom: 1px; }
-.p-reg { font-size: 8px; color: #5a5a64; margin-top: 3px; }
+.p-lbl { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; margin-bottom: 5px; }
+.p-name { font-size: 14px; font-weight: 700; color: #16161e; margin-bottom: 2px; }
+.p-meta { font-size: 10px; color: #6e6e78; margin-bottom: 1px; }
+.p-reg { font-size: 10px; color: #5a5a64; margin-top: 3px; }
 
 /* ── Meta bar: 5-column taupe card (mirrors web roundedRect) ─────────────── */
-.meta-bar { display: flex; background: #f6f2e8; border-radius: 4px; margin-bottom: 18px; overflow: hidden; }
-.mc { flex: 1; padding: 8px 10px; border-right: 1px solid rgba(175,145,55,0.2); }
+.meta-bar { display: flex; background: #f6f2e8; border-radius: 4px; margin-bottom: 24px; overflow: hidden; }
+.mc { flex: 1; padding: 12px 12px; border-right: 1px solid rgba(175,145,55,0.2); }
 .mc:last-child { border-right: none; }
-.mc-lbl { font-size: 6px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.1px; color: #af9137; margin-bottom: 3px; white-space: nowrap; overflow: hidden; }
-.mc-val { font-size: 7px; font-weight: 700; color: #16161e; }
+.mc-lbl { font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.1px; color: #af9137; margin-bottom: 3px; white-space: nowrap; overflow: hidden; }
+.mc-val { font-size: 10px; font-weight: 700; color: #16161e; }
 
 /* ── Items table ─────────────────────────────────────────────────────────── */
-table { width: 100%; border-collapse: collapse; margin-bottom: 6px; font-size: 8.5px; }
+table { width: 100%; table-layout: fixed; border-collapse: collapse; margin-bottom: 6px; font-size: 11px; }
 thead { background: #eaeaf0; }
-th { padding: 6px 8px; text-align: left; font-size: 6.5px; text-transform: uppercase; letter-spacing: 0.7px; font-weight: 700; color: #16161e; white-space: nowrap; }
+th { padding: 6px 4px; text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.7px; font-weight: 700; color: #16161e; white-space: nowrap; overflow: hidden; }
 th.r { text-align: right; }
-td { padding: 7px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; color: #6e6e78; }
+td { padding: 6px 4px; border-bottom: 1px solid #f0f0f0; vertical-align: top; color: #6e6e78; font-size: 11px; white-space: nowrap; overflow: hidden; }
 td.desc { color: #16161e; }
 td.bold { font-weight: 700; color: #16161e; }
 td.r { text-align: right; }
 tr.alt td { background: #faf8f4; }
-.period { font-size: 7px; color: #999; }
+.period { font-size: 8px; color: #999; }
 .table-rule { width: 100%; height: 1px; background: #af9137; margin-bottom: 14px; opacity: 0.5; }
 
 /* ── Payment + Totals two-column section ─────────────────────────────────── */
-.bottom { display: flex; gap: 16px; margin-top: 4px; }
-.payment { flex: 1; min-width: 0; }
-.sec-lbl { font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; margin-bottom: 7px; }
+.bottom { display: table; width: 100%; margin-top: 40px; }
+.payment { display: table-cell; width: 50%; vertical-align: top; padding-right: 8px; }
+.sec-lbl { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; margin-bottom: 7px; }
 .pay-row { display: flex; gap: 8px; margin-bottom: 4px; }
-.pay-key { font-size: 8px; color: #6e6e78; width: 84px; flex-shrink: 0; }
-.pay-val { font-size: 8.5px; font-weight: 600; color: #16161e; font-family: monospace; }
+.pay-key { font-size: 11px; color: #6e6e78; width: 84px; flex-shrink: 0; }
+.pay-val { font-size: 11px; font-weight: 600; color: #16161e; font-family: monospace; }
 
 /* Barcode block — only shows when IBAN + reference both present */
-.bc-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px solid #eaeaf0; }
-.bc-title { font-size: 6.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; text-align: center; margin-bottom: 5px; }
-.bc-ref { font-size: 7.5px; color: #6e6e78; text-align: center; margin-top: 4px; font-family: monospace; letter-spacing: 1px; }
-.bc-details { margin-top: 8px; }
+.bc-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px solid #eaeaf0; display: flex; flex-direction: column; align-items: center; }
+.bc-title { font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; text-align: center; margin-bottom: 5px; width: 100%; }
+.bc-ref { font-size: 9px; color: #6e6e78; text-align: center; margin-top: 4px; font-family: monospace; letter-spacing: 1px; }
+.bc-details { margin-top: 10px; width: 100%; }
 .bc-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
-.bc-k { font-size: 8px; font-weight: 700; color: #16161e; }
-.bc-v { font-size: 8px; color: #6e6e78; font-family: monospace; }
+.bc-k { font-size: 10px; font-weight: 700; color: #16161e; }
+.bc-v { font-size: 10px; color: #6e6e78; font-family: monospace; text-align: right; }
 
 /* ── Summary / totals (right column) ────────────────────────────────────── */
-.totals { width: 210px; flex-shrink: 0; }
-.total-row { display: flex; justify-content: space-between; padding: 3.5px 0; border-bottom: 1px solid #eee; font-size: 8.5px; }
+.totals { display: table-cell; width: 50%; vertical-align: top; padding-left: 8px; }
+.total-row { display: flex; justify-content: space-between; padding: 3.5px 0; border-bottom: 1px solid #eee; font-size: 11px; }
 .tlbl { color: #6e6e78; }
 .tval { font-weight: 600; color: #16161e; }
 .total-rule { height: 1px; background: #af9137; margin: 7px 0; opacity: 0.6; }
 /* Grand total: TAUPE bg + gold border — mirrors web roundedRect FD style */
-.grand-total { background: #f6f2e8; border: 1px solid #af9137; padding: 7px 10px; border-radius: 4px; display: flex; justify-content: space-between; font-weight: 700; font-size: 9.5px; color: #16161e; margin-top: 4px; }
+.grand-total { background: #f6f2e8; border: 1px solid #af9137; padding: 12px 14px; border-radius: 4px; display: flex; justify-content: space-between; font-weight: 700; font-size: 13px; color: #16161e; margin-top: 4px; }
 
 /* ── Footer ──────────────────────────────────────────────────────────────── */
-.footer { margin-top: 24px; border-top: 1px solid rgba(175,145,55,0.45); padding-top: 10px; display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
-.fl { font-size: 7.5px; color: #6e6e78; line-height: 1.7; }
-.fl-name { font-weight: 700; color: #16161e; font-size: 8px; display: block; }
+.footer { margin-top: 36px; border-top: 1px solid rgba(175,145,55,0.45); padding-top: 10px; display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+.fl { font-size: 11px; color: #6e6e78; line-height: 1.7; }
+.fl-name { font-weight: 700; color: #16161e; font-size: 11px; display: block; }
 .fr { flex: 1; }
-.notes-lbl { font-size: 7px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; margin-bottom: 4px; }
-.notes-body { font-size: 7.5px; color: #6e6e78; line-height: 1.5; }
+.notes-lbl { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; color: #af9137; margin-bottom: 4px; }
+.notes-body { font-size: 11px; color: #6e6e78; line-height: 1.5; }
 /* Watermark — very bottom */
 .watermark { margin-top: 14px; display: flex; justify-content: space-between; }
-.wm { font-size: 6.5px; color: #c8c8d2; }
+.wm { font-size: 8px; color: #c8c8d2; }
 </style>
 </head>
 <body>
+<div id="page">
 
 <!-- HEADER: three-column flex — truly centered title, invoice number right -->
 <div class="header">
@@ -331,16 +340,16 @@ tr.alt td { background: #faf8f4; }
 
 <!-- ITEMS TABLE -->
 ${lineItems.length > 0 ? `
-<table>
+<table style="width:100%; table-layout:fixed;">
   <thead>
     <tr>
-      <th>${pdfT('description').toUpperCase()}</th>
-      <th class="r" style="width:36px">${pdfT('quantity').toUpperCase()}</th>
-      <th class="r" style="width:36px">${pdfT('unit').toUpperCase()}</th>
-      <th class="r" style="width:66px">${pdfT('unitPrice').toUpperCase()}</th>
-      ${hasDiscount ? `<th class="r" style="width:60px">${pdfT('discount').toUpperCase()}${discountSuffix}</th>` : ''}
-      <th class="r" style="width:38px">${pdfT('vatPct').toUpperCase()}</th>
-      <th class="r" style="width:66px">${pdfT('grandTotal').toUpperCase()}</th>
+      <th style="width:28%">${pdfT('description').toUpperCase()}</th>
+      <th class="r" style="width:6%">${pdfT('quantity').toUpperCase()}</th>
+      <th class="r" style="width:7%">${pdfT('unit').toUpperCase()}</th>
+      <th class="r" style="width:13%">${pdfT('unitPrice').toUpperCase()}</th>
+      ${hasDiscount ? `<th class="r" style="width:13%">${pdfT('discount').toUpperCase()}${discountSuffix}</th>` : ''}
+      <th class="r" style="width:8%">${pdfT('vatPct').toUpperCase()}</th>
+      <th class="r" style="width:13%">${pdfT('grandTotal').toUpperCase()}</th>
     </tr>
   </thead>
   <tbody>${lineItemsHtml}</tbody>
@@ -350,19 +359,16 @@ ${lineItems.length > 0 ? `
 <!-- PAYMENT DETAILS + SUMMARY: two-column (mirrors web payX/totX layout) -->
 <div class="bottom">
   <div class="payment">
-    ${(fromIban || fromBic || referenceNumber) ? `
-    <div class="sec-lbl">${pdfT('paymentDetails')}</div>
-    ${fromName       ? `<div class="pay-row"><span class="pay-key">${pdfT('accountName')}</span><span class="pay-val">${fromName}</span></div>` : ''}
-    ${fromIban       ? `<div class="pay-row"><span class="pay-key">${pdfT('iban')}</span><span class="pay-val">${fromIban}</span></div>` : ''}
-    ${fromBic        ? `<div class="pay-row"><span class="pay-key">${pdfT('bic')}</span><span class="pay-val">${fromBic}</span></div>` : ''}
-    ${referenceNumber ? `<div class="pay-row"><span class="pay-key">${pdfT('referenceNo')}</span><span class="pay-val">${referenceNumber}</span></div>` : ''}
-    ` : ''}
     ${(fromIban && referenceNumber) ? `
     <div class="bc-wrap">
-      <div class="bc-title">${pdfT('paymentRef')}</div>
-      ${buildBarcodeSvg(referenceNumber, 160, 26)}
+      <div class="bc-title">${pdfT('paymentDetails')}</div>
+      ${buildBarcodeSvg(referenceNumber, 200, 45)}
       <div class="bc-ref">${referenceNumber}</div>
       <div class="bc-details">
+        ${fromName       ? `<div class="bc-row"><span class="bc-k">${pdfT('accountName')}:</span><span class="bc-v">${fromName}</span></div>` : ''}
+        <div class="bc-row"><span class="bc-k">${pdfT('iban')}:</span><span class="bc-v">${fromIban}</span></div>
+        ${fromBic        ? `<div class="bc-row"><span class="bc-k">${pdfT('bic')}:</span><span class="bc-v">${fromBic}</span></div>` : ''}
+        <div class="bc-row"><span class="bc-k">${pdfT('referenceNo')}:</span><span class="bc-v">${referenceNumber}</span></div>
         <div class="bc-row"><span class="bc-k">${pdfT('amount')}:</span><span class="bc-v">${fmt(totalAmount)}</span></div>
         ${dueDate ? `<div class="bc-row"><span class="bc-k">${pdfT('dueDate')}:</span><span class="bc-v">${fmtDate(dueDate)}</span></div>` : ''}
       </div>
@@ -381,6 +387,8 @@ ${lineItems.length > 0 ? `
     <div class="grand-total"><span>${pdfT('totalAmount')}</span><span>${fmt(totalAmount)}</span></div>
   </div>
 </div>
+
+<div class="spacer"></div>
 
 <!-- FOOTER: company info left + notes right — mirrors web footer layout -->
 <div class="footer">
@@ -404,6 +412,7 @@ ${lineItems.length > 0 ? `
   <span class="wm">${pdfT('page')}</span>
 </div>
 
+</div>
 </body>
 </html>`;
 }
@@ -449,6 +458,19 @@ function defaultLineItem(): InvoiceLineItem {
   return { id: genId(), description: '', period: '', quantity: 1, unit: 'pcs', unitPrice: 0, vatPercent: 25.5, discount: '', lineTotal: 0, lineVatAmount: 0 };
 }
 
+function calcDueDateStr(issueDateStr: string, term: string): string {
+  const d = new Date(issueDateStr + 'T12:00:00');
+  if (isNaN(d.getTime())) return issueDateStr;
+  if (term === 'Net 7') d.setDate(d.getDate() + 7);
+  else if (term === 'Net 14') d.setDate(d.getDate() + 14);
+  else if (term === 'Net 30') d.setDate(d.getDate() + 30);
+  // 'Due on Receipt' = same day, no offset
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${day}`;
+}
+
 // ─── Main Screen ────────────────────────────────────────────────────────────
 
 export default function InvoicesScreen() {
@@ -487,24 +509,36 @@ export default function InvoicesScreen() {
     if (idx === 1) { await deleteInvoice(id); await load(); }
   };
 
+  const handleDownload = async (invoice: Invoice) => {
+    if (!Print || !Sharing) { showDialog(t('notInstalled'), 'Run in your project:\nnpx expo install expo-print expo-sharing'); return; }
+    try {
+      const html = buildInvoiceHtml(invoice, currency, settings);
+      const { uri } = await Print.printToFileAsync({ html, base64: false, width: 595, height: 842 });
+      await Sharing.shareAsync(uri, {
+        mimeType: 'application/pdf',
+        UTI: 'com.adobe.pdf',
+        dialogTitle: `Invoice_${invoice.invoiceNumber}.pdf`,
+      });
+    } catch (e: any) {
+      showDialog('Download Error', e?.message ?? 'Could not open PDF.');
+    }
+  };
+
   const handlePdf = async (invoice: Invoice) => {
     if (!Print || !Sharing) {
-      Alert.alert(
-        t('notInstalled'),
-        'Run in your project:\nnpx expo install expo-print expo-sharing'
-      );
+      showDialog(t('notInstalled'), 'Run in your project:\nnpx expo install expo-print expo-sharing');
       return;
     }
     try {
       const html = buildInvoiceHtml(invoice, currency, settings);
-      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      const { uri } = await Print.printToFileAsync({ html, base64: false, width: 595, height: 842 });
       await Sharing.shareAsync(uri, {
         mimeType: 'application/pdf',
         dialogTitle: `Invoice ${invoice.invoiceNumber}`,
         UTI: 'com.adobe.pdf',
       });
     } catch (e: any) {
-      Alert.alert('PDF Error', e?.message ?? 'Could not generate PDF.');
+      showDialog('PDF Error', e?.message ?? 'Could not generate PDF.');
     }
   };
 
@@ -566,7 +600,7 @@ export default function InvoicesScreen() {
       )}
 
       {/* Filter pills */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.filterScroll} contentContainerStyle={styles.filterRow}>
         {filters.map(f => {
           const col = FILTER_COLORS[f];
           const icon = FILTER_ICONS[f] || 'circle';
@@ -577,7 +611,7 @@ export default function InvoicesScreen() {
               style={[styles.filterPill, active && { backgroundColor: col + '20', borderColor: col }]}
               onPress={() => { setActiveFilter(f); Haptics.selectionAsync(); }}
             >
-              <Feather name={icon as any} size={13} color={active ? col : COLORS.muted} />
+              <Feather name={icon as any} size={11} color={active ? col : COLORS.muted} />
               <Text style={[styles.filterText, active && { color: col }]}>
                 {t(f === 'all' ? 'all' : f)}
               </Text>
@@ -587,7 +621,7 @@ export default function InvoicesScreen() {
       </ScrollView>
 
       <ScrollView
-        contentContainerStyle={{ paddingBottom: insets.bottom + 100, paddingTop: 8 }}
+        contentContainerStyle={{ paddingBottom: insets.bottom + 100, paddingTop: 4 }}
         showsVerticalScrollIndicator={false}
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
       >
@@ -610,6 +644,7 @@ export default function InvoicesScreen() {
                 else handleDelete(inv.id);
               }}
               onPdfPress={() => handlePdf(inv)}
+              onDownloadPress={() => handleDownload(inv)}
             />
           ))
         )}
@@ -646,6 +681,7 @@ interface AddInvoiceModalProps {
 function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invoices, initialInvoice }: AddInvoiceModalProps) {
   const m = makeM();
   const insets = useSafeAreaInsets();
+  const { show: showDialog, dialog } = useAppDialog();
   const computedNextNum = useMemo(() => getNextInvoiceNumber(invoices), [invoices, visible]);
   const nextInvNum = initialInvoice?.invoiceNumber ?? computedNextNum;
 
@@ -677,6 +713,8 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
   const [dueDate, setDueDate] = useState('');
   const [referenceNumber, setReferenceNumber] = useState('');
   const [paymentTerms, setPaymentTerms] = useState('Net 30');
+  const [showIssueDatePicker, setShowIssueDatePicker] = useState(false);
+  const [showDueDatePicker, setShowDueDatePicker] = useState(false);
   const [status, setStatus] = useState<Invoice['status']>('draft');
 
   // Line items
@@ -779,9 +817,9 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
   ).map(([pct, vat]) => ({ pct: Number(pct), vat }));
 
   const handleSave = () => {
-    if (!clientName.trim()) { Alert.alert(t('clientName') + ' required'); return; }
+    if (!clientName.trim()) { showDialog(t('clientName') + ' required'); return; }
     if (lineItems.every(li => !li.description.trim() && li.unitPrice === 0)) {
-      Alert.alert('Add at least one line item'); return;
+      showDialog('Add at least one line item'); return;
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const inv: Invoice = {
@@ -912,14 +950,18 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
               </View>
               <View style={[m.detailsCell, m.detailsCellBorder]}>
                 <Text style={m.fieldLabel}>{t('issueDate')}</Text>
-                <TextInput style={m.detailInput} value={issueDate} onChangeText={setIssueDate} placeholderTextColor={COLORS.muted} />
+                <Pressable onPress={() => setShowIssueDatePicker(true)}>
+                  <Text style={m.detailInput}>{issueDate}</Text>
+                </Pressable>
               </View>
             </View>
             <View style={m.detailsDivider} />
             <View style={m.detailsGrid}>
               <View style={m.detailsCell}>
                 <Text style={m.fieldLabel}>{t('dueDate')}</Text>
-                <TextInput style={m.detailInput} value={dueDate} onChangeText={setDueDate} placeholderTextColor={COLORS.muted} />
+                <Pressable onPress={() => setShowDueDatePicker(true)}>
+                  <Text style={m.detailInput}>{dueDate}</Text>
+                </Pressable>
               </View>
               <View style={[m.detailsCell, m.detailsCellBorder]}>
                 <Text style={m.fieldLabel}>{t('referenceNumber')}</Text>
@@ -931,7 +973,10 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
               <Text style={m.fieldLabel}>{t('paymentTerms')}</Text>
               <View style={m.chipRow}>
                 {PAYMENT_TERMS.map(term => (
-                  <Pressable key={term} style={[m.chip, paymentTerms === term && m.chipActive]} onPress={() => setPaymentTerms(term)}>
+                  <Pressable key={term} style={[m.chip, paymentTerms === term && m.chipActive]} onPress={() => {
+                    setPaymentTerms(term);
+                    setDueDate(calcDueDateStr(issueDate, term));
+                  }}>
                     <Text style={[m.chipText, paymentTerms === term && m.chipTextActive]}>{term}</Text>
                   </Pressable>
                 ))}
@@ -945,13 +990,6 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
             <View style={m.vatToggleRow}>
               <Switch value={vatIncluded} onValueChange={handleVatToggle} trackColor={{ true: COLORS.primary }} thumbColor={COLORS.background} />
               <Text style={m.vatToggleLabel}>{vatIncluded ? t('vatIncluded') : t('vatExcluded')}</Text>
-            </View>
-            <View style={m.presetRow}>
-              {VAT_PRESETS.map(pct => (
-                <Pressable key={pct} style={[m.presetChip, lineItems.every(li => li.vatPercent === pct) && m.presetChipActive]} onPress={() => applyVatPreset(pct)}>
-                  <Text style={[m.presetChipText, lineItems.every(li => li.vatPercent === pct) && m.presetChipTextActive]}>{pct}%</Text>
-                </Pressable>
-              ))}
             </View>
           </View>
 
@@ -987,7 +1025,6 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                     [t('quantity'), 'quantity', 'decimal-pad'],
                     [t('unit'), 'unit', 'default'],
                     [t('unitPrice'), 'unitPrice', 'decimal-pad'],
-                    ['VAT %', 'vatPercent', 'decimal-pad'],
                   ] as [string, string, any][]).map(([lbl, field, kb]) => (
                     <View key={field} style={m.lineGridCell}>
                       <Text style={m.lineGridLabel}>{lbl}</Text>
@@ -1011,6 +1048,17 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                     placeholder="e.g. 10%, 15"
                     placeholderTextColor={COLORS.muted + '60'}
                   />
+                </View>
+                <View style={m.itemVatRow}>
+                  {VAT_PRESETS.map(pct => (
+                    <Pressable
+                      key={pct}
+                      style={[m.presetChip, li.vatPercent === pct && m.presetChipActive]}
+                      onPress={() => updateLineItem(li.id, 'vatPercent', String(pct))}
+                    >
+                      <Text style={[m.presetChipText, li.vatPercent === pct && m.presetChipTextActive]}>{pct}%</Text>
+                    </Pressable>
+                  ))}
                 </View>
                 <View style={m.lineTotalsRow}>
                   <Text style={m.lineTotalsMeta}>{t('net')}: <Text style={{ color: COLORS.text }}>{formatCurrency(lineNet, currency)}</Text></Text>
@@ -1092,6 +1140,29 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
           <View style={{ height: insets.bottom + 20 }} />
         </ScrollView>
       </KeyboardAvoidingView>
+      {showIssueDatePicker && (
+        <DatePickerModal
+          visible={showIssueDatePicker}
+          value={issueDate}
+          onConfirm={d => {
+            setIssueDate(d);
+            setDueDate(calcDueDateStr(d, paymentTerms));
+            setShowIssueDatePicker(false);
+          }}
+          onCancel={() => setShowIssueDatePicker(false)}
+          title={t('issueDate')}
+        />
+      )}
+      {showDueDatePicker && (
+        <DatePickerModal
+          visible={showDueDatePicker}
+          value={dueDate}
+          onConfirm={d => { setDueDate(d); setShowDueDatePicker(false); }}
+          onCancel={() => setShowDueDatePicker(false)}
+          title={t('dueDate')}
+        />
+      )}
+      {dialog}
     </Modal>
   );
 }
@@ -1135,9 +1206,10 @@ const makeStyles = () => StyleSheet.create({
   unpaidCount: { fontSize: 12, fontWeight: '700', color: COLORS.danger },
   unpaidAmt: { fontSize: 10, color: COLORS.muted },
   unpaidLink: { fontSize: 10, fontWeight: '700', color: COLORS.danger },
-  filterRow: { paddingHorizontal: 16, gap: 8, paddingBottom: 12, paddingTop: 4 },
-  filterPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingVertical: 9, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.card },
-  filterText: { fontSize: 13, fontWeight: '600', color: COLORS.muted },
+  filterScroll: { flexShrink: 1, flexGrow: 0 },
+  filterRow: { paddingHorizontal: 16, gap: 6, paddingBottom: 4, paddingTop: 4, alignItems: 'center' },
+  filterPill: { flexDirection: 'row', alignItems: 'center', gap: 5, height: 32, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 16, borderWidth: 1, borderColor: COLORS.border, backgroundColor: COLORS.card },
+  filterText: { fontSize: 11, fontWeight: '600', color: COLORS.muted },
   empty: { alignItems: 'center', paddingTop: 80, gap: 12 },
   emptyText: { fontSize: 15, color: COLORS.muted },
   emptyBtn: { backgroundColor: COLORS.primaryDim, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, borderWidth: 1, borderColor: COLORS.primary + '40', marginTop: 4 },
@@ -1212,6 +1284,7 @@ const makeM = () => StyleSheet.create({
   lineGridLabel: { fontSize: 8, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 4 },
   lineGridInput: { fontSize: 12, color: COLORS.text, backgroundColor: COLORS.surface, borderRadius: 6, paddingHorizontal: 4, paddingVertical: 5, width: '85%' },
   discRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: 1, borderTopColor: COLORS.border + '50', gap: 8 },
+  itemVatRow: { flexDirection: 'row', gap: 5, paddingHorizontal: 12, paddingVertical: 8, borderTopWidth: 1, borderTopColor: COLORS.border + '50' },
   discLabel: { fontSize: 9, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '600' },
   discInput: { flex: 1, fontSize: 11, color: COLORS.text, textAlign: 'right', backgroundColor: COLORS.surface, borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4 },
   lineTotalsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8, paddingHorizontal: 12, paddingVertical: 9, backgroundColor: COLORS.surface, borderTopWidth: 1, borderTopColor: COLORS.border + '30' },

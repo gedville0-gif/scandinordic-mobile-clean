@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { View, Text, ScrollView, StyleSheet, Pressable, TextInput } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, Pressable, TextInput, Alert, Modal } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { getTransactions, getInvoices, getSettings } from '@/lib/storage';
@@ -84,11 +84,14 @@ export default function BalanceSheetScreen() {
   const [pendingEndDate, setPendingEndDate] = useState(todayStr);
   const [showEndDatePicker, setShowEndDatePicker] = useState(false);
   const dateDirty = pendingEndDate !== endDate;
+  const [selectedYear, setSelectedYear] = useState(now.getFullYear());
+  const [showYearPicker, setShowYearPicker] = useState(false);
 
   // Manual inputs — kept as strings while typing; parsed on compute only
   const [fixedAssets, setFixedAssets] = useState('');
   const [openingEquity, setOpeningEquity] = useState('');
   const [ownerWithdrawal, setOwnerWithdrawal] = useState('');
+  const [saved, setSaved] = useState(false);
 
   const load = useCallback(async () => {
     const [tx, inv, s, savedDate, savedManual] = await Promise.all([
@@ -111,54 +114,21 @@ export default function BalanceSheetScreen() {
   }, []);
 
   const handleSaveData = useCallback(async () => {
-    setEndDate(pendingEndDate);
-    await Promise.all([
-      AsyncStorage.setItem(BALANCE_DATE_KEY, pendingEndDate),
-      AsyncStorage.setItem(BALANCE_MANUAL_KEY, JSON.stringify({ fixedAssets, openingEquity, ownerWithdrawal })),
-    ]);
+    try {
+      setEndDate(pendingEndDate);
+      await Promise.all([
+        AsyncStorage.setItem(BALANCE_DATE_KEY, pendingEndDate),
+        AsyncStorage.setItem(BALANCE_MANUAL_KEY, JSON.stringify({ fixedAssets, openingEquity, ownerWithdrawal })),
+      ]);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      Alert.alert('Error', 'Could not save data.');
+    }
   }, [pendingEndDate, fixedAssets, openingEquity, ownerWithdrawal]);
 
-  const handleExportPDF = useCallback(async () => {
-    const fmt2 = (v: number) => formatCurrency(v, currency);
-    const parseManual = (v: string) => parseFloat(v.replace(',', '.')) || 0;
-    const fa = parseManual(fixedAssets);
-    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/>
-      <style>body{font-family:Helvetica,sans-serif;padding:32px;color:#111;}
-      h1{font-size:22px;margin-bottom:4px;}
-      .sub{color:#888;font-size:13px;margin-bottom:24px;}
-      table{width:100%;border-collapse:collapse;}
-      td{padding:9px 12px;border-bottom:1px solid #e8e8e8;font-size:13px;}
-      .label{color:#444;} .value{text-align:right;font-weight:600;}
-      .section{background:#f7f7f7;font-weight:700;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:#888;padding:10px 12px;}
-      .total td{font-weight:700;font-size:13px;background:#fafafa;}
-      .footer{margin-top:32px;font-size:11px;color:#aaa;text-align:center;}
-      </style></head><body>
-      <h1>${t('balanceSheet')}</h1>
-      <div class="sub">${t('periodEnd')}: ${endDate}</div>
-      <table>
-        <tr><td colspan="2" class="section">${t('assets')}</td></tr>
-        <tr><td class="label" style="padding-left:24px">${t('fixedAssets')}</td><td class="value">${fmt2(fa)}</td></tr>
-        <tr><td class="label" style="padding-left:24px">${t('receivables')}</td><td class="value">${fmt2(computed.receivables)}</td></tr>
-        <tr class="total"><td class="label">${t('totalAssets')}</td><td class="value">${fmt2(computed.totalAssets)}</td></tr>
-        <tr><td colspan="2" class="section">${t('equity')}</td></tr>
-        <tr><td class="label" style="padding-left:24px">${t('openingEquity')}</td><td class="value">${fmt2(parseManual(openingEquity))}</td></tr>
-        <tr><td class="label" style="padding-left:24px">${t('ownerWithdrawal')}</td><td class="value">${fmt2(parseManual(ownerWithdrawal))}</td></tr>
-        <tr><td class="label" style="padding-left:24px">${t('periodProfit')}</td><td class="value">${fmt2(computed.netProfit)}</td></tr>
-        <tr class="total"><td class="label">${t('totalEquity')}</td><td class="value">${fmt2(computed.totalEquity)}</td></tr>
-        <tr><td colspan="2" class="section">${t('liabilities')}</td></tr>
-        <tr><td class="label" style="padding-left:24px">${t('vatPayable')}</td><td class="value">${fmt2(computed.vatPayable)}</td></tr>
-        <tr class="total"><td class="label">${t('totalLiabilities')}</td><td class="value">${fmt2(computed.totalLiab)}</td></tr>
-        <tr class="total"><td class="label">${t('totalEquityLiab')}</td><td class="value">${fmt2(computed.totalEL)}</td></tr>
-      </table>
-      <div class="footer">◆ ScandiNordic Pro v.2</div>
-      </body></html>`;
-    try {
-      const { uri } = await Print.printToFileAsync({ html });
-      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', UTI: '.pdf' });
-    } catch {}
-  }, [computed, currency, endDate, fixedAssets, openingEquity, ownerWithdrawal, t]);
-
   useEffect(() => { load(); }, []);
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
   const computed = useMemo(() => {
     const e = new Date(endDate);
@@ -196,6 +166,54 @@ export default function BalanceSheetScreen() {
 
   const fmt = (v: number) => formatCurrency(v, currency);
 
+  const handleExportPDF = useCallback(async () => {
+    const fmt2 = (v: number) => formatCurrency(v, currency);
+    const parseManual = (v: string) => parseFloat(v.replace(',', '.')) || 0;
+    const fa = parseManual(fixedAssets);
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"/>
+<style>
+  body{font-family:Arial,sans-serif;padding:32px;color:#111;background:#fff;}
+  h1{font-size:22px;margin-bottom:4px;}
+  .sub{color:#888;font-size:13px;margin-bottom:24px;}
+  table{width:100%;border-collapse:collapse;margin-bottom:20px;}
+  th{text-align:left;font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#888;padding:6px 10px;border-bottom:1px solid #ddd;}
+  td{padding:8px 10px;font-size:13px;border-bottom:1px solid #f0f0f0;}
+  .indent{padding-left:24px;color:#555;}
+  .total td{font-weight:700;font-size:14px;background:#f8f8f8;border-top:2px solid #ddd;}
+  .gold{color:#c9952a;}
+</style>
+</head><body>
+<h1>Balance Sheet</h1>
+<p class="sub">As of ${endDate} &nbsp;|&nbsp; Generated ${new Date().toLocaleDateString()}</p>
+<table>
+  <tr><th>Assets</th><th style="text-align:right">Amount</th></tr>
+  <tr><td class="indent">Fixed Assets</td><td style="text-align:right">${fmt2(fa)}</td></tr>
+  <tr><td class="indent">Receivables</td><td style="text-align:right">${fmt2(computed.receivables)}</td></tr>
+  <tr class="total"><td>Total Assets</td><td style="text-align:right" class="gold">${fmt2(computed.totalAssets)}</td></tr>
+</table>
+<table>
+  <tr><th>Equity</th><th style="text-align:right">Amount</th></tr>
+  <tr><td class="indent">Opening Equity</td><td style="text-align:right">${fmt2(parseManual(openingEquity))}</td></tr>
+  <tr><td class="indent">Owner Withdrawal</td><td style="text-align:right">${fmt2(parseManual(ownerWithdrawal))}</td></tr>
+  <tr><td class="indent">Period Profit/Loss</td><td style="text-align:right">${fmt2(computed.netProfit)}</td></tr>
+  <tr class="total"><td>Total Equity</td><td style="text-align:right" class="gold">${fmt2(computed.totalEquity)}</td></tr>
+</table>
+<table>
+  <tr><th>Liabilities</th><th style="text-align:right">Amount</th></tr>
+  <tr><td class="indent">VAT Payable</td><td style="text-align:right">${fmt2(computed.vatPayable)}</td></tr>
+  <tr class="total"><td>Total Liabilities</td><td style="text-align:right" class="gold">${fmt2(computed.totalLiab)}</td></tr>
+</table>
+<table>
+  <tr class="total"><td>Total Equity + Liabilities</td><td style="text-align:right" class="gold">${fmt2(computed.totalEL)}</td></tr>
+</table>
+</body></html>`;
+    try {
+      const { uri } = await Print.printToFileAsync({ html });
+      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', UTI: '.pdf' });
+    } catch {}
+  }, [computed, currency, endDate, fixedAssets, openingEquity, ownerWithdrawal]);
+
   const s: RowStyles = {
     tableRow: styles.tableRow,
     totalRow: styles.totalRow,
@@ -211,15 +229,45 @@ export default function BalanceSheetScreen() {
       showsVerticalScrollIndicator={false}
       keyboardShouldPersistTaps="handled"
     >
-        <Pressable style={styles.back} onPress={() => router.back()}>
-          <Feather name="arrow-left" size={18} color={COLORS.primary} />
+        <Pressable style={styles.back} onPress={() => router.back()} hitSlop={10}>
+          <Feather name="arrow-left" size={28} color={COLORS.primary} />
           <Text style={styles.backText}>{t('reports')}</Text>
         </Pressable>
         <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>
         <View style={styles.titleRow}>
           <Text style={styles.title}>{t('balanceSheet')} 📒</Text>
+          <Pressable style={styles.yearBadge} onPress={() => setShowYearPicker(true)}>
+            <Text style={styles.yearBadgeText}>{selectedYear}</Text>
+            <Feather name="chevron-down" size={11} color={COLORS.muted} />
+          </Pressable>
         </View>
         <View style={styles.divider} />
+
+        {/* Year picker modal */}
+        <Modal visible={showYearPicker} transparent animationType="fade" onRequestClose={() => setShowYearPicker(false)}>
+          <Pressable style={styles.yearOverlay} onPress={() => setShowYearPicker(false)}>
+            <View style={styles.yearSheet}>
+              <Text style={styles.yearSheetTitle}>{t('selectYear')}</Text>
+              {Array.from({ length: 10 }, (_, i) => now.getFullYear() - 4 + i).map(yr => (
+                <Pressable
+                  key={yr}
+                  style={[styles.yearOption, selectedYear === yr && styles.yearOptionActive]}
+                  onPress={() => {
+                    setSelectedYear(yr);
+                    const newDate = `${yr}-12-31`;
+                    setPendingEndDate(newDate);
+                    setShowYearPicker(false);
+                  }}
+                >
+                  <Text style={[styles.yearOptionText, selectedYear === yr && styles.yearOptionTextActive]}>
+                    {yr}
+                  </Text>
+                  {selectedYear === yr && <Feather name="check" size={14} color={COLORS.primary} />}
+                </Pressable>
+              ))}
+            </View>
+          </Pressable>
+        </Modal>
 
         {/* Period end date */}
         <View style={styles.periodCard}>
@@ -232,13 +280,15 @@ export default function BalanceSheetScreen() {
           </Pressable>
           <Text style={styles.periodHint}>{t('changesNotSaved')}</Text>
         </View>
-        <DatePickerModal
-          visible={showEndDatePicker}
-          value={pendingEndDate}
-          onConfirm={d => { setPendingEndDate(d); setShowEndDatePicker(false); }}
-          onCancel={() => setShowEndDatePicker(false)}
-          title={t('periodEnd')}
-        />
+        {showEndDatePicker && (
+          <DatePickerModal
+            visible={showEndDatePicker}
+            value={pendingEndDate}
+            onConfirm={d => { setPendingEndDate(d); setShowEndDatePicker(false); }}
+            onCancel={() => setShowEndDatePicker(false)}
+            title={t('periodEnd')}
+          />
+        )}
 
         {/* Table */}
         <View style={styles.table}>
@@ -274,9 +324,12 @@ export default function BalanceSheetScreen() {
 
         {/* Save Data / Export PDF */}
         <View style={styles.actionRow}>
-          <Pressable style={styles.saveDataBtn} onPress={handleSaveData}>
-            <Feather name="save" size={16} color={COLORS.text} />
-            <Text style={styles.saveDataBtnText}>{t('saveData')}</Text>
+          <Pressable
+            style={({ pressed }) => [styles.saveDataBtn, pressed && { opacity: 0.65 }]}
+            onPress={handleSaveData}
+          >
+            <Feather name={saved ? 'check-circle' : 'save'} size={16} color={saved ? COLORS.success : COLORS.text} />
+            <Text style={[styles.saveDataBtnText, saved && { color: COLORS.success }]}>{t('saveData')}</Text>
           </Pressable>
           <Pressable style={styles.exportPdfBtn} onPress={handleExportPDF}>
             <Feather name="file-text" size={16} color={COLORS.background} />
@@ -294,7 +347,35 @@ const makeStyles = () => StyleSheet.create({
   back: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   backText: { fontSize: 14, color: COLORS.primary, fontWeight: '500' },
   badge: { fontSize: 9, color: COLORS.primary, letterSpacing: 4, textTransform: 'uppercase' },
-  titleRow: { marginTop: 4 },
+  titleRow: { marginTop: 4, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  yearBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 99,
+    backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border,
+  },
+  yearBadgeText: { fontSize: 11, fontWeight: '600', color: COLORS.muted },
+  yearOverlay: {
+    flex: 1, backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center', alignItems: 'center', padding: 40,
+  },
+  yearSheet: {
+    backgroundColor: COLORS.card, borderRadius: 18,
+    borderWidth: 1, borderColor: COLORS.primary + '40',
+    paddingVertical: 8, width: '100%', maxWidth: 220,
+  },
+  yearSheetTitle: {
+    fontSize: 10, fontWeight: '700', color: COLORS.primary,
+    textTransform: 'uppercase', letterSpacing: 2,
+    paddingHorizontal: 16, paddingVertical: 10, textAlign: 'center',
+    borderBottomWidth: 1, borderBottomColor: COLORS.border,
+  },
+  yearOption: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 13,
+  },
+  yearOptionActive: { backgroundColor: COLORS.primary + '25' },
+  yearOptionText: { fontSize: 17, fontWeight: '500', color: COLORS.textSecondary },
+  yearOptionTextActive: { color: COLORS.primary, fontWeight: '700', fontSize: 17 },
   title: { fontSize: 24, fontWeight: '700', color: COLORS.text, letterSpacing: -0.5 },
   divider: { height: 1, backgroundColor: COLORS.border },
   periodCard: {
@@ -313,7 +394,7 @@ const makeStyles = () => StyleSheet.create({
   saveDataBtn: {
     flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     borderRadius: 14, borderWidth: 1, borderColor: COLORS.border,
-    backgroundColor: COLORS.card, paddingVertical: 15,
+    backgroundColor: COLORS.surface, paddingVertical: 15,
   },
   saveDataBtnText: { fontSize: 14, fontWeight: '600', color: COLORS.text },
   exportPdfBtn: {

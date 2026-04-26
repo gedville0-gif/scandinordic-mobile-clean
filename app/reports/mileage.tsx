@@ -405,8 +405,8 @@ export default function MileageScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Header */}
-        <Pressable style={styles.back} onPress={() => router.back()}>
-          <Feather name="arrow-left" size={18} color={COLORS.primary} />
+        <Pressable style={styles.back} onPress={() => router.back()} hitSlop={10}>
+          <Feather name="arrow-left" size={28} color={COLORS.primary} />
           <Text style={styles.backText}>{t('reports')}</Text>
         </Pressable>
         <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>

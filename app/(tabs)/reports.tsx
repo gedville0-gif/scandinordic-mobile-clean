@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  View, Text, ScrollView, StyleSheet, Pressable, RefreshControl, Modal,
+  View, Text, ScrollView, StyleSheet, Pressable, RefreshControl,
 } from 'react-native';
 import Svg, { G, Path, Circle, Text as SvgText } from 'react-native-svg';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -139,8 +139,6 @@ export default function ReportsScreen() {
   const [period, setPeriod] = useState<Period>('year');
   const [refreshing, setRefreshing] = useState(false);
   const [catMode, setCatMode] = useState<CatMode>('income');
-  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
-  const [showYearPicker, setShowYearPicker] = useState(false);
 
   const load = useCallback(async () => {
     const [tx, s] = await Promise.all([getTransactions(), getSettings()]);
@@ -153,32 +151,30 @@ export default function ReportsScreen() {
 
   const now = new Date();
 
+  const thisYear = now.getFullYear();
+
   const filtered = useMemo(() => {
     if (period === 'month') {
       return transactions.filter(tx => {
         const d = new Date(tx.date);
-        return d.getMonth() === now.getMonth() && d.getFullYear() === selectedYear;
+        return d.getMonth() === now.getMonth() && d.getFullYear() === thisYear;
       });
     }
     if (period === 'quarter') {
       const q = Math.floor(now.getMonth() / 3);
-      const qs = new Date(selectedYear, q * 3, 1);
-      const qe = new Date(selectedYear, q * 3 + 3, 0);
+      const qs = new Date(thisYear, q * 3, 1);
+      const qe = new Date(thisYear, q * 3 + 3, 0);
       return transactions.filter(tx => { const d = new Date(tx.date); return d >= qs && d <= qe; });
     }
     if (period === 'year') {
-      return transactions.filter(tx => new Date(tx.date).getFullYear() === selectedYear);
+      return transactions.filter(tx => new Date(tx.date).getFullYear() === thisYear);
     }
     return transactions;
-  }, [transactions, period, selectedYear]);
+  }, [transactions, period]);
 
   const totalIncome = useMemo(() => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount, 0), [filtered]);
   const totalExpenses = useMemo(() => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount, 0), [filtered]);
   const netProfit = totalIncome - totalExpenses;
-
-  const vatCollected = useMemo(() => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount * (tx.vatRate || 0) / 100, 0), [filtered]);
-  const vatPaid = useMemo(() => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount * (tx.vatRate || 0) / 100, 0), [filtered]);
-  const netVat = vatCollected - vatPaid;
 
   const taxEstimate = useMemo(() => estimateTax(netProfit), [netProfit]);
 
@@ -198,13 +194,6 @@ export default function ReportsScreen() {
     [catMap, catTotal, catMode, t],
   );
 
-  // VAT due date: 12th of next month (or this month if before 12th)
-  const vatDue = now.getDate() <= 12
-    ? new Date(now.getFullYear(), now.getMonth(), 12)
-    : new Date(now.getFullYear(), now.getMonth() + 1, 12);
-  const vatDueStr = vatDue.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
-  const daysUntilDue = Math.ceil((vatDue.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-
   const PERIODS: { key: Period; label: string }[] = [
     { key: 'month', label: t('thisMonth') },
     { key: 'quarter', label: t('quarterly') },
@@ -217,7 +206,7 @@ export default function ReportsScreen() {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: COLORS.background }}
-      contentContainerStyle={[styles.content, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 100 }]}
+      contentContainerStyle={[styles.content, { paddingTop: insets.top + 8, paddingBottom: insets.bottom + 100 }]}
       showsVerticalScrollIndicator={false}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />}
     >
@@ -225,33 +214,8 @@ export default function ReportsScreen() {
       <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>
       <View style={styles.titleRow}>
         <Text style={styles.title}>{t('reports')}</Text>
-        <Pressable style={styles.yearBadge} onPress={() => setShowYearPicker(true)}>
-          <Text style={styles.yearBadgeText}>{selectedYear}</Text>
-          <Feather name="chevron-down" size={11} color={COLORS.muted} />
-        </Pressable>
       </View>
       <View style={styles.divider} />
-
-      {/* Year picker modal */}
-      <Modal visible={showYearPicker} transparent animationType="fade" onRequestClose={() => setShowYearPicker(false)}>
-        <Pressable style={styles.yearOverlay} onPress={() => setShowYearPicker(false)}>
-          <View style={styles.yearSheet}>
-            <Text style={styles.yearSheetTitle}>{t('selectYear')}</Text>
-            {Array.from({ length: 10 }, (_, i) => now.getFullYear() - 4 + i).map(yr => (
-              <Pressable
-                key={yr}
-                style={[styles.yearOption, selectedYear === yr && styles.yearOptionActive]}
-                onPress={() => { setSelectedYear(yr); setShowYearPicker(false); }}
-              >
-                <Text style={[styles.yearOptionText, selectedYear === yr && styles.yearOptionTextActive]}>
-                  {yr}
-                </Text>
-                {selectedYear === yr && <Feather name="check" size={14} color={COLORS.primary} />}
-              </Pressable>
-            ))}
-          </View>
-        </Pressable>
-      </Modal>
 
       {/* Period filter */}
       <View style={styles.periodRow}>
@@ -267,59 +231,6 @@ export default function ReportsScreen() {
           </Pressable>
         ))}
       </View>
-
-      {/* Summary */}
-      <View style={styles.card}>
-        <Text style={styles.cardTitle}>{t('summary')}</Text>
-        <View style={styles.summaryGrid}>
-          {[
-            { label: t('totalIncome'), value: formatCurrency(totalIncome, currency), color: COLORS.success, icon: 'trending-up' },
-            { label: t('totalExpenses'), value: formatCurrency(totalExpenses, currency), color: COLORS.danger, icon: 'trending-down' },
-            { label: t('netProfit'), value: formatCurrency(netProfit, currency), color: netProfit >= 0 ? COLORS.success : COLORS.danger, icon: 'dollar-sign' },
-            { label: t('netVat'), value: formatCurrency(netVat, currency), color: COLORS.info, icon: 'percent' },
-          ].map(item => (
-            <View key={item.label} style={styles.summaryItem}>
-              <View style={[styles.summaryIcon, { backgroundColor: item.color + '18' }]}>
-                <Feather name={item.icon as any} size={14} color={item.color} />
-              </View>
-              <Text style={styles.summaryLabel}>{item.label}</Text>
-              <Text style={[styles.summaryValue, { color: item.color }]}>{item.value}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
-
-      {/* VAT Due Date */}
-      <Pressable style={styles.vatDueCard} onPress={() => router.push('/vat')}>
-        <View style={styles.vatDueLeft}>
-          <View style={styles.vatDateBox}>
-            <Text style={styles.vatDateMonth}>
-              {vatDue.toLocaleDateString('en', { month: 'short' }).toUpperCase()}
-            </Text>
-            <Text style={styles.vatDateDay}>12</Text>
-          </View>
-          <View>
-            <Text style={styles.vatDueLabel}>{t('vatDue')}</Text>
-            <Text style={styles.vatDueStr}>{vatDueStr}</Text>
-          </View>
-        </View>
-        <View style={styles.vatDueRight}>
-          <View style={[
-            styles.vatDueBadge,
-            daysUntilDue < 0 ? styles.vatOverdue :
-            daysUntilDue <= 7 ? styles.vatSoon : styles.vatUpcoming,
-          ]}>
-            <Text style={[
-              styles.vatDueBadgeText,
-              daysUntilDue < 0 ? { color: COLORS.danger } :
-              daysUntilDue <= 7 ? { color: COLORS.primary } : { color: COLORS.muted },
-            ]}>
-              {daysUntilDue < 0 ? t('overdue') : daysUntilDue <= 7 ? t('dueSoon') : t('upcoming')}
-            </Text>
-          </View>
-          <Feather name="chevron-right" size={14} color={COLORS.muted} style={{ marginTop: 4 }} />
-        </View>
-      </Pressable>
 
       {/* Tax Estimate */}
       {netProfit > 0 && (
@@ -389,13 +300,6 @@ export default function ReportsScreen() {
           </Text>
         )}
       </View>
-
-      {/* VAT detail link */}
-      <Pressable style={({ pressed }) => [styles.vatLinkBtn, pressed && { opacity: 0.75 }]} onPress={() => router.push('/vat')}>
-        <Feather name="percent" size={14} color={COLORS.primary} />
-        <Text style={styles.vatLinkText}>{t('vatSummary')}</Text>
-        <Feather name="chevron-right" size={14} color={COLORS.primary} />
-      </Pressable>
 
       {/* Sub-report navigation */}
       <Text style={styles.subTitle}>{t('detailedReports')}</Text>
