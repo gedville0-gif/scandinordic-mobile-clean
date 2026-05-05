@@ -1,0 +1,25 @@
+#!/bin/bash
+# .claude/hooks/SessionStart.sh
+# Runs automatically when Claude Code session starts
+
+echo ""
+echo "╔════════════════════════════════════════╗"
+echo "║     SCANDINORDIC PRO — Mobile App      ║"
+echo "╚════════════════════════════════════════╝"
+echo ""
+echo "📁 Project: scandinordic-mobile-clean"
+echo "⚡ Backend: Supabase (lib/supabase.ts)"
+echo "🌍 i18n: en | fi | sv | da (lib/i18n.ts)"
+echo ""
+echo "🚫 DO NOT TOUCH:"
+echo "   - transactions.tsx"
+echo "   - googleVision/"
+echo "   - Deno/"
+echo ""
+echo "✅ ALWAYS after changes:"
+echo "   npx tsc --noEmit"
+echo ""
+echo "⚠️  PRE-EXISTING ERRORS (ignore):"
+echo "   - expo-file-system/legacy in transactions.tsx"
+echo "   - TS2322 null filter in transactions.tsx"
+echo ""

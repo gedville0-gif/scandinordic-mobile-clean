@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, Pressable, Switch,
-  Animated, useWindowDimensions, StatusBar,
+  useWindowDimensions, StatusBar,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
-import { useTheme } from '../../contexts/ThemeContext';
 import { Colors } from '../../constants/colors';
 import { saveOnboardingProfile } from '../../lib/storage';
+import { useTheme } from '../../contexts/ThemeContext';
 import {
   PROFESSIONS, FEATURES, PROFESSION_FEATURES, CATEGORY_LABELS, FEATURE_ORDER,
   type ProfessionId, type FeatureId, type FeatureMap, type ProfessionCategory,
@@ -17,7 +17,7 @@ const CATEGORIES: ProfessionCategory[] = ['services', 'products', 'team', 'creat
 
 export default function ProfessionOnboarding() {
   const { mode } = useTheme();
-  const C = Colors[mode];
+  const C = Colors[mode] ?? Colors.dark;
   const insets = useSafeAreaInsets();
   const { width } = useWindowDimensions();
 

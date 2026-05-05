@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import { Modal, View, Text, Pressable, StyleSheet } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import { COLORS } from '@/constants/colors';
-import { useTheme } from '@/contexts/ThemeContext';
 import { useLanguage } from '@/contexts/LanguageContext';
 
 interface Props {
@@ -30,9 +29,8 @@ function toYMD(year: number, month: number, day: number): string {
 }
 
 export default function DatePickerModal({ visible, value, onConfirm, onCancel, title }: Props) {
-  const { mode } = useTheme();
   const { t } = useLanguage();
-  const styles = makeStyles(mode);
+  const styles = makeStyles();
   const initial = parseDate(value);
 
   const [year, setYear] = useState(initial.getFullYear());
@@ -143,10 +141,10 @@ export default function DatePickerModal({ visible, value, onConfirm, onCancel, t
   );
 }
 
-const makeStyles = (mode: 'dark' | 'light') => StyleSheet.create({
+const makeStyles = () => StyleSheet.create({
   overlay: {
     flex: 1,
-    backgroundColor: mode === 'dark' ? 'rgba(0,0,0,0.93)' : 'rgba(0,0,0,0.55)',
+    backgroundColor: 'rgba(0,0,0,0.93)',
     justifyContent: 'center', alignItems: 'center', padding: 24,
   },
   container: {

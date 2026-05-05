@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { useAppDialog } from '@/components/AppDialog';
 import {
   getWorkers, saveWorker, deleteWorker,
@@ -126,6 +127,7 @@ function startOfMonth(): Date {
 export default function TeamScreen() {
   const styles = makeStyles();
   const insets = useSafeAreaInsets();
+  const { session } = useAuth();
   const { t, language } = useLanguage();
   const { show: showDialog, dialog } = useAppDialog();
 
@@ -168,6 +170,7 @@ export default function TeamScreen() {
   const [empGross, setEmpGross] = useState('');
   const [empHours, setEmpHours] = useState('160');
   const [empTaxOverride, setEmpTaxOverride] = useState('');
+  const [empSaveError, setEmpSaveError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [w, s, settings] = await Promise.all([getWorkers(), getWorkSessions(), getSettings()]);
@@ -270,17 +273,24 @@ export default function TeamScreen() {
   // ── Payroll CRUD ────────────────────────────────────────────────────────────
 
   const loadPayroll = useCallback(async () => {
+    const userId = session?.user?.id;
+    if (!userId) return;
     setPayrollLoading(true);
     try {
-      const { data } = await supabase.from('team_payroll').select('*').order('name');
+      const { data, error } = await supabase.from('team_payroll').select('*').eq('user_id', userId).order('name');
+      if (error) {
+        console.error('[payroll] loadPayroll error:', JSON.stringify(error));
+      }
       setPayrollEmployees(data ?? []);
-    } catch {}
-    finally { setPayrollLoading(false); }
-  }, []);
+    } catch (err) {
+      console.error('[payroll] loadPayroll exception:', err);
+    } finally { setPayrollLoading(false); }
+  }, [session]);
 
   useEffect(() => { loadPayroll(); }, [loadPayroll]);
 
   function openAddEmployee(emp?: PayrollEmployee) {
+    setEmpSaveError(null);
     if (emp) {
       setEditEmployee(emp);
       setEmpName(emp.name);
@@ -296,6 +306,8 @@ export default function TeamScreen() {
   }
 
   async function handleSaveEmployee() {
+    const userId = session?.user?.id;
+    if (!userId) { setEmpSaveError('Not signed in.'); return; }
     const gross = parseFloat(empGross.replace(',', '.'));
     const hours = parseFloat(empHours) || 160;
     if (!empName.trim() || isNaN(gross) || gross <= 0) return;
@@ -306,27 +318,43 @@ export default function TeamScreen() {
       gross_salary: gross,
       hours_per_month: hours,
       tax_rate_override: taxOverride,
+      user_id: userId,
     };
+    setEmpSaveError(null);
     try {
+      console.log('[payroll] saving employee payload:', JSON.stringify(payload));
       if (editEmployee) {
-        await supabase.from('team_payroll').update(payload).eq('id', editEmployee.id);
+        const { error } = await supabase.from('team_payroll').update(payload).eq('id', editEmployee.id).eq('user_id', userId);
+        if (error) {
+          console.error('[payroll] update error:', JSON.stringify(error));
+          setEmpSaveError(error.message || 'Update failed. Check console for details.');
+          return;
+        }
       } else {
-        await supabase.from('team_payroll').insert({ ...payload, id: Date.now().toString() });
+        const { error } = await supabase.from('team_payroll').insert(payload);
+        if (error) {
+          console.error('[payroll] insert error:', JSON.stringify(error));
+          setEmpSaveError(error.message || 'Insert failed. Check console for details.');
+          return;
+        }
       }
       setShowAddEmployee(false);
       await loadPayroll();
     } catch (err) {
-      console.error('[payroll] save employee failed:', err);
+      console.error('[payroll] save employee exception:', err);
+      setEmpSaveError(err instanceof Error ? err.message : 'Unexpected error. Check console.');
     }
   }
 
   async function handleDeleteEmployee(id: string) {
+    const userId = session?.user?.id;
+    if (!userId) return;
     const idx = await showDialog(t('delete'), t('removeThisWorker'), [
       { text: t('cancel'), style: 'cancel' },
       { text: t('delete'), style: 'destructive' },
     ]);
     if (idx === 1) {
-      await supabase.from('team_payroll').delete().eq('id', id);
+      await supabase.from('team_payroll').delete().eq('id', id).eq('user_id', userId);
       setShowBreakdown(false);
       await loadPayroll();
     }
@@ -724,6 +752,12 @@ export default function TeamScreen() {
 
               <Text style={[styles.fieldLabel, { marginTop: 16 }]}>{t('taxRateOverride')} <Text style={{ color: COLORS.muted, textTransform: 'none' }}>({t('taxRateOverrideHint')})</Text></Text>
               <TextInput style={styles.input} value={empTaxOverride} onChangeText={setEmpTaxOverride} placeholder="e.g. 28" placeholderTextColor={COLORS.muted} keyboardType="decimal-pad" />
+
+              {empSaveError ? (
+                <Text style={{ color: COLORS.danger, fontSize: 13, marginTop: 12, textAlign: 'center' }}>
+                  {empSaveError}
+                </Text>
+              ) : null}
 
               <Pressable
                 style={[styles.saveBtn, (!empName.trim() || !empGross) && { opacity: 0.4 }]}

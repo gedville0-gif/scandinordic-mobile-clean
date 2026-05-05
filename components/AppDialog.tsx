@@ -3,7 +3,6 @@ import {
   Modal, View, Text, Pressable, StyleSheet,
 } from 'react-native';
 import { COLORS } from '@/constants/colors';
-import { useTheme } from '@/contexts/ThemeContext';
 
 export interface AppDialogButton {
   text: string;
@@ -20,8 +19,7 @@ interface AppDialogProps {
 }
 
 export function AppDialog({ visible, title, message, buttons, onClose }: AppDialogProps) {
-  const { mode } = useTheme();
-  const s = makeStyles(mode);
+  const s = makeStyles();
   const btns: AppDialogButton[] = buttons && buttons.length > 0
     ? buttons
     : [{ text: 'OK', style: 'default' }];
@@ -83,11 +81,11 @@ export function AppDialog({ visible, title, message, buttons, onClose }: AppDial
   );
 }
 
-function makeStyles(mode: 'dark' | 'light') {
+function makeStyles() {
   return StyleSheet.create({
     overlay: {
       flex: 1,
-      backgroundColor: mode === 'dark' ? 'rgba(0,0,0,0.88)' : 'rgba(0,0,0,0.50)',
+      backgroundColor: 'rgba(0,0,0,0.88)',
       alignItems: 'center',
       justifyContent: 'center',
       padding: 32,

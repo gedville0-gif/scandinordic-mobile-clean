@@ -5,31 +5,26 @@ import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/constants/colors';
 import { formatCurrency } from '@/lib/currency';
 import type { Transaction, Currency } from '@/lib/types';
+import { INCOME_CATEGORIES, EXPENSE_CATEGORIES } from '@/constants/categories';
 
 interface TransactionItemProps {
   item: Transaction;
   currency: Currency;
   onPress?: (item: Transaction) => void;
+  onLongPress?: () => void;
   onDelete?: (id: string) => void;
   onReceiptPress?: (url: string) => void;
+  selectMode?: boolean;
+  selected?: boolean;
 }
 
-const CATEGORY_ICONS: Record<string, string> = {
-  Consulting: 'briefcase',
-  Development: 'code',
-  Writing: 'edit-2',
-  Design: 'pen-tool',
-  Software: 'monitor',
-  Office: 'package',
-  Travel: 'map-pin',
-  Marketing: 'bar-chart-2',
-  Other: 'circle',
-};
-
-export function TransactionItem({ item, currency, onPress, onDelete, onReceiptPress }: TransactionItemProps) {
+export function TransactionItem({ item, currency, onPress, onLongPress, onDelete, onReceiptPress, selectMode = false, selected = false }: TransactionItemProps) {
   const isIncome = item.type === 'income';
   const color = isIncome ? COLORS.success : COLORS.danger;
-  const icon = CATEGORY_ICONS[item.category] || 'circle';
+  const cats = isIncome ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  const catDef = cats.find(c => c.id === item.category);
+  const icon = catDef?.icon ?? 'circle';
+  const categoryLabel = catDef?.label ?? item.category;
   const date = new Date(item.date);
   const dateStr = date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
 
@@ -91,15 +86,28 @@ export function TransactionItem({ item, currency, onPress, onDelete, onReceiptPr
 
   return (
     <Pressable
-      style={({ pressed }) => [styles.row, pressed && styles.pressed]}
+      style={({ pressed }) => [
+        styles.row,
+        selected && { backgroundColor: COLORS.primary + '10' },
+        pressed && styles.pressed,
+      ]}
       onPress={handlePress}
+      onLongPress={() => { onLongPress?.(); }}
+      delayLongPress={350}
     >
+      {selectMode && (
+        <Feather
+          name={selected ? 'check-square' : 'square'}
+          size={18}
+          color={selected ? COLORS.primary : COLORS.muted}
+        />
+      )}
       <View style={[styles.iconWrap, { backgroundColor: color + '18' }]}>
         <Feather name={icon as any} size={16} color={color} />
       </View>
       <View style={styles.info}>
         <Text style={styles.description} numberOfLines={1}>{item.description}</Text>
-        <Text style={styles.meta}>{item.category} · {dateStr}</Text>
+        <Text style={styles.meta}>{categoryLabel} · {dateStr}</Text>
       </View>
       <View style={styles.right}>
         <Text style={[styles.amount, { color }]}>

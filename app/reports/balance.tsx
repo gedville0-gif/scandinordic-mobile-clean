@@ -6,15 +6,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { getTransactions, getInvoices, getSettings } from '@/lib/storage';
+import { getTransactions, getInvoices, getSettings, getUserScopedKey } from '@/lib/storage';
 import { formatCurrency } from '@/lib/currency';
 import type { Currency } from '@/lib/types';
 import DatePickerModal from '@/components/DatePickerModal';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 
-const BALANCE_DATE_KEY = 'balance_end_date';
-const BALANCE_MANUAL_KEY = 'balance_manual_inputs';
 
 // ─── Row defined at MODULE level so React never remounts TextInput on re-render ──
 
@@ -96,8 +94,8 @@ export default function BalanceSheetScreen() {
   const load = useCallback(async () => {
     const [tx, inv, s, savedDate, savedManual] = await Promise.all([
       getTransactions(), getInvoices(), getSettings(),
-      AsyncStorage.getItem(BALANCE_DATE_KEY),
-      AsyncStorage.getItem(BALANCE_MANUAL_KEY),
+      getUserScopedKey('balance_end_date').then(k => AsyncStorage.getItem(k)),
+      getUserScopedKey('balance_manual_inputs').then(k => AsyncStorage.getItem(k)),
     ]);
     setTransactions(tx);
     setInvoices(inv);
@@ -117,8 +115,8 @@ export default function BalanceSheetScreen() {
     try {
       setEndDate(pendingEndDate);
       await Promise.all([
-        AsyncStorage.setItem(BALANCE_DATE_KEY, pendingEndDate),
-        AsyncStorage.setItem(BALANCE_MANUAL_KEY, JSON.stringify({ fixedAssets, openingEquity, ownerWithdrawal })),
+        getUserScopedKey('balance_end_date').then(k => AsyncStorage.setItem(k, pendingEndDate)),
+        getUserScopedKey('balance_manual_inputs').then(k => AsyncStorage.setItem(k, JSON.stringify({ fixedAssets, openingEquity, ownerWithdrawal }))),
       ]);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);

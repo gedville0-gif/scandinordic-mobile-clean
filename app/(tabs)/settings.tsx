@@ -42,7 +42,7 @@ export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { t, language, setLanguage } = useLanguage();
   const { user, signOut } = useAuth();
-  const { mode: themeMode, toggleTheme } = useTheme();
+  const { mode, setMode } = useTheme();
   const { show: showDialog, dialog } = useAppDialog();
 
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -68,7 +68,6 @@ export default function SettingsScreen() {
   const handleSave = async () => {
     if (!draft) return;
     await saveSettings(draft);
-    if ((draft.darkMode === true) !== (themeMode === 'dark')) toggleTheme();
     if (draft.language !== language) setLanguage(draft.language);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     await load();
@@ -187,8 +186,12 @@ export default function SettingsScreen() {
             <View style={styles.row}>
               <Text style={styles.rowLabel}>{t('darkMode')}</Text>
               <Switch
-                value={draft.darkMode ?? (themeMode === 'dark')}
-                onValueChange={v => patchDraft({ darkMode: v })}
+                value={mode === 'dark'}
+                onValueChange={v => {
+                  const newMode = v ? 'dark' : 'light';
+                  setMode(newMode);
+                  patchDraft({ darkMode: v });
+                }}
                 trackColor={{ false: COLORS.border, true: COLORS.primary }}
                 thumbColor={COLORS.background}
               />
@@ -270,6 +273,22 @@ export default function SettingsScreen() {
             </View>
           </>
         )}
+      </View>
+
+      {/* Integrations */}
+      <View style={styles.card}>
+        <Pressable
+          style={({ pressed }) => [styles.cardHeader, { borderBottomWidth: 0 }, pressed && { backgroundColor: COLORS.surface }]}
+          onPress={() => { Haptics.selectionAsync(); router.push('/integrations'); }}
+        >
+          <View style={styles.rowLeft}>
+            <View style={styles.rowIconBox}>
+              <Feather name="zap" size={14} color={COLORS.primary} />
+            </View>
+            <Text style={[styles.rowLabel, { fontSize: 14 }]}>Integrations</Text>
+          </View>
+          <Feather name="chevron-right" size={16} color={COLORS.muted} />
+        </Pressable>
       </View>
 
       {/* Plan */}

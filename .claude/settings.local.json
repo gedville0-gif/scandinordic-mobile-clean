@@ -17,7 +17,15 @@
       "Bash(echo \"exit: $?\")",
       "Bash(node_modules/.bin/tsc --noEmit)",
       "Bash(./node_modules/.bin/tsc --noEmit)",
-      "Bash(git:*)"
+      "Bash(git:*)",
+      "Bash(taskkill /F /IM node.exe)",
+      "Read(//c/Users/Omistaja/Desktop/ui-ref//**)",
+      "Read(//c/Users/Omistaja/Desktop/ui-ref/**)",
+      "Bash(unzip -o scandinordic-claude-setup.zip -d scandinordic-claude-setup)",
+      "Bash(chmod +x \"C:/Users/Omistaja/Desktop/scandinordic-mobile-clean/.claude/hooks/SessionStart.sh\" \"C:/Users/Omistaja/Desktop/scandinordic-mobile-clean/.claude/hooks/PostToolUse.sh\" \"C:/Users/Omistaja/Desktop/scandinordic-mobile-clean/.claude/hooks/PreCompact.sh\")",
+      "Bash(node *)",
+      "Bash(npx supabase *)",
+      "Bash(npx eas *)"
     ]
   }
 }

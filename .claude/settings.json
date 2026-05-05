@@ -1,0 +1,20 @@
+{
+  "model": "claude-sonnet-4-20250514",
+  "hooks": {
+    "SessionStart": [".claude/hooks/SessionStart.sh"],
+    "PostToolUse": [".claude/hooks/PostToolUse.sh"],
+    "PreCompact": [".claude/hooks/PreCompact.sh"]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc*)",
+      "Bash(npx expo*)",
+      "Bash(npm install*)",
+      "Bash(npm run*)"
+    ],
+    "deny": [
+      "Bash(rm -rf*)",
+      "Bash(git push*)"
+    ]
+  }
+}

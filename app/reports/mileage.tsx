@@ -1,11 +1,11 @@
 /**
- * REQUIRES: npx expo install expo-location
+ * REQUIRES: npx expo install expo-location expo-task-manager
  * Add to app.json plugins: ["expo-location"]
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Pressable, TextInput,
-  Modal, KeyboardAvoidingView, Platform, Alert, AppState,
+  Modal, KeyboardAvoidingView, Platform, AppState,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Feather } from '@expo/vector-icons';
@@ -17,20 +17,65 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { useAppDialog } from '@/components/AppDialog';
 import DatePickerModal from '@/components/DatePickerModal';
 import { getSettings } from '@/lib/storage';
+import { supabase } from '@/lib/supabase';
+import { getCurrentUserId } from '@/lib/session';
 import { formatCurrency } from '@/lib/currency';
 import type { Currency } from '@/lib/types';
 
-// expo-location + expo-task-manager — install with:
-//   npx expo install expo-location expo-task-manager
 let Location: any = null;
 let TaskManager: any = null;
 try { Location = require('expo-location'); } catch {}
 try { TaskManager = require('expo-task-manager'); } catch {}
 
-const MILEAGE_RATE    = 0.25;
-const STORAGE_KEY     = 'mileage_journeys';
+// ── Travel Mode Config ────────────────────────────────────────────────────────
+
+type TravelCategory = 'km' | 'receipt' | 'allowance';
+type TravelMode =
+  | 'car' | 'motorcycle' | 'moped' | 'snowmobile' | 'atv' | 'bicycle'
+  | 'taxi' | 'bus' | 'train' | 'flight'
+  | 'meal';
+
+interface ModeConfig {
+  id: TravelMode;
+  label: string;
+  icon: string;
+  category: TravelCategory;
+  rate?: number;
+  rateLabel: string;
+}
+
+const TRAVEL_MODES: ModeConfig[] = [
+  { id: 'car',        label: 'Car',            icon: '🚗', category: 'km',        rate: 0.55, rateLabel: '0.55 €/km' },
+  { id: 'motorcycle', label: 'Motorcycle',      icon: '🏍️', category: 'km',        rate: 0.42, rateLabel: '0.42 €/km' },
+  { id: 'moped',      label: 'Moped',           icon: '🛵', category: 'km',        rate: 0.23, rateLabel: '0.23 €/km' },
+  { id: 'snowmobile', label: 'Snowmobile',      icon: '🛷', category: 'km',        rate: 1.34, rateLabel: '1.34 €/km' },
+  { id: 'atv',        label: 'ATV / Quadbike',  icon: '🏎️', category: 'km',        rate: 1.26, rateLabel: '1.26 €/km' },
+  { id: 'bicycle',    label: 'Bicycle / Other', icon: '🚲', category: 'km',        rate: 0.13, rateLabel: '0.13 €/km' },
+  { id: 'taxi',       label: 'Taxi',            icon: '🚕', category: 'receipt',               rateLabel: 'Actual fare' },
+  { id: 'bus',        label: 'Bus',             icon: '🚌', category: 'receipt',               rateLabel: 'Ticket price' },
+  { id: 'train',      label: 'Train',           icon: '🚂', category: 'receipt',               rateLabel: 'Ticket price' },
+  { id: 'flight',     label: 'Flight',          icon: '✈️',  category: 'receipt',               rateLabel: 'Ticket price' },
+  { id: 'meal',       label: 'Meal Allowance',  icon: '🍽️', category: 'allowance',             rateLabel: '€25–€54' },
+];
+
+const MEAL_RATES = { sixHour: 25, tenHour: 54 };
+
+function getModeConfig(id?: TravelMode): ModeConfig {
+  return TRAVEL_MODES.find(m => m.id === id) ?? TRAVEL_MODES[0];
+}
+
+function calcMealAllowance(hours: number): number {
+  if (hours >= 10) return MEAL_RATES.tenHour;
+  if (hours >= 6)  return MEAL_RATES.sixHour;
+  return 0;
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
 const BACKGROUND_TASK = 'MILEAGE_BACKGROUND_LOCATION';
 const ACTIVE_KEY      = 'mileage_active_journey';
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 interface ActiveJourney {
   startTime: string;
@@ -49,15 +94,20 @@ interface Journey {
   purpose: string;
   distanceKm: number;
   deductible: number;
+  travelMode?: TravelMode;
+  notes?: string;
+  receiptAmount?: number;
+  hoursAway?: number;
   coordinates?: Coordinate[];
   startTime?: string;
   endTime?: string;
   isGps?: boolean;
 }
 
+// ── Pure helpers ──────────────────────────────────────────────────────────────
+
 function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
-/** Haversine formula — returns distance in km */
 function haversine(a: Coordinate, b: Coordinate): number {
   const R = 6371;
   const dLat = (b.lat - a.lat) * Math.PI / 180;
@@ -69,7 +119,34 @@ function haversine(a: Coordinate, b: Coordinate): number {
   return R * 2 * Math.atan2(Math.sqrt(chord), Math.sqrt(1 - chord));
 }
 
-// ── Background location task (module-level, runs even when app is minimised) ─
+async function reverseGeocode(coord: Coordinate, fallback: string): Promise<string> {
+  if (!Location) return fallback;
+  try {
+    const results = await Location.reverseGeocodeAsync({ latitude: coord.lat, longitude: coord.lng });
+    if (!results?.length) return fallback;
+    const place  = results[0];
+    const city   = place.city || place.subregion || place.region || '';
+    const street = place.street || place.name || '';
+    if (city && street) return `${city}, ${street}`;
+    if (city) return city;
+    if (street) return street;
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function fmtElapsed(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  return h > 0
+    ? `${h}:${String(m % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+    : `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+}
+
+// ── Background location task (module-level — runs when app is minimised) ─────
+
 if (TaskManager) {
   try {
     TaskManager.defineTask(BACKGROUND_TASK, async ({ data, error }: any) => {
@@ -92,49 +169,67 @@ if (TaskManager) {
   } catch {}
 }
 
-function fmtElapsed(ms: number): string {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  return h > 0
-    ? `${h}:${String(m % 60).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-    : `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-}
+// ── Supabase I/O ──────────────────────────────────────────────────────────────
 
 async function loadJourneys(): Promise<Journey[]> {
-  try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch { return []; }
+  const userId = getCurrentUserId();
+  if (!userId) return [];
+  const { data, error } = await supabase
+    .from('mileage_journeys')
+    .select('data')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+  if (error) { console.error('[mileage_journeys] fetch failed:', error); return []; }
+  return (data ?? []).map(row => row.data as Journey);
 }
 
 async function saveJourneys(journeys: Journey[]) {
-  await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(journeys));
+  const userId = getCurrentUserId();
+  if (!userId) return;
+  await supabase.from('mileage_journeys').delete().eq('user_id', userId);
+  if (journeys.length === 0) return;
+  const rows = journeys.map(j => ({ id: j.id, user_id: userId, data: j }));
+  const { error } = await supabase.from('mileage_journeys').insert(rows);
+  if (error) console.error('[mileage_journeys] insert failed:', error);
 }
+
+// ── Component ─────────────────────────────────────────────────────────────────
 
 export default function MileageScreen() {
   const styles = makeStyles();
-  const insets  = useSafeAreaInsets();
-  const { t }   = useLanguage();
+  const insets = useSafeAreaInsets();
+  const { t }  = useLanguage();
   const { show: showDialog, dialog } = useAppDialog();
+
   const [journeys, setJourneys] = useState<Journey[]>([]);
   const [currency, setCurrency] = useState<Currency>('EUR');
-  const [showForm, setShowForm] = useState(false);
 
-  // GPS tracking state
-  const [tracking, setTracking] = useState(false);
+  // Active travel mode — persisted via ref for use in async GPS callbacks
+  const [activeMode, setActiveMode] = useState<TravelMode>('car');
+  const activeModeRef = useRef<TravelMode>('car');
+  const syncMode = (m: TravelMode) => { setActiveMode(m); activeModeRef.current = m; };
+
+  // Modal visibility
+  const [showModePicker, setShowModePicker] = useState(false);
+  const [pickerStep, setPickerStep]         = useState<'select' | 'km-action'>('select');
+  const [showKmForm, setShowKmForm]         = useState(false);
+  const [showReceiptForm, setShowReceiptForm] = useState(false);
+  const [showMealForm, setShowMealForm]     = useState(false);
+
+  // GPS tracking state — UNCHANGED from original
+  const [tracking, setTracking]     = useState(false);
   const [trackPurpose, setTrackPurpose] = useState('');
-  const [elapsed, setElapsed] = useState(0);
-  const [liveKm, setLiveKm] = useState(0);
-  const [liveSpeed, setLiveSpeed] = useState(0);
-  const [gpsError, setGpsError] = useState('');
-  const coordsRef   = useRef<Coordinate[]>([]);
-  const distRef     = useRef(0);
-  const startRef    = useRef<Date | null>(null);
-  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
-  const watchRef    = useRef<any>(null);
+  const [elapsed, setElapsed]       = useState(0);
+  const [liveKm, setLiveKm]         = useState(0);
+  const [liveSpeed, setLiveSpeed]   = useState(0);
+  const [gpsError, setGpsError]     = useState('');
+  const coordsRef = useRef<Coordinate[]>([]);
+  const distRef   = useRef(0);
+  const startRef  = useRef<Date | null>(null);
+  const timerRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  const watchRef  = useRef<any>(null);
 
-  // Manual form state
+  // Manual KM form state
   const [mFrom, setMFrom]       = useState('');
   const [mTo, setMTo]           = useState('');
   const [mPurpose, setMPurpose] = useState('');
@@ -142,13 +237,29 @@ export default function MileageScreen() {
   const [mDate, setMDate]       = useState(new Date().toISOString().split('T')[0]);
   const [showMDatePicker, setShowMDatePicker] = useState(false);
 
+  // Receipt form state
+  const [rFrom, setRFrom]     = useState('');
+  const [rTo, setRTo]         = useState('');
+  const [rAmount, setRAmount] = useState('');
+  const [rNotes, setRNotes]   = useState('');
+  const [rDate, setRDate]     = useState(new Date().toISOString().split('T')[0]);
+  const [showRDatePicker, setShowRDatePicker] = useState(false);
+
+  // Meal allowance form state
+  const [mealHours, setMealHours] = useState('');
+  const [mealNotes, setMealNotes] = useState('');
+  const [mealDate, setMealDate]   = useState(new Date().toISOString().split('T')[0]);
+  const [showMealDatePicker, setShowMealDatePicker] = useState(false);
+
+  // ── Data loading ────────────────────────────────────────────────────────────
+
   const load = useCallback(async () => {
     const [j, s] = await Promise.all([loadJourneys(), getSettings()]);
     setJourneys(j.sort((a, b) => b.date.localeCompare(a.date)));
     setCurrency(s.currency);
   }, []);
 
-  // Restore active journey from AsyncStorage on mount
+  // Restore active journey from AsyncStorage on mount — UNCHANGED
   useEffect(() => {
     load();
     AsyncStorage.getItem(ACTIVE_KEY).then(raw => {
@@ -169,7 +280,7 @@ export default function MileageScreen() {
     });
   }, []);
 
-  // Sync live distance from AsyncStorage when app returns to foreground
+  // Sync live distance when app returns to foreground — UNCHANGED
   useEffect(() => {
     const sub = AppState.addEventListener('change', async (state) => {
       if (state === 'active' && tracking) {
@@ -186,38 +297,42 @@ export default function MileageScreen() {
     return () => sub.remove();
   }, [tracking]);
 
-  // Only stop the timer on unmount — background task keeps running
+  // Stop timer on unmount only — background task keeps running — UNCHANGED
   useEffect(() => {
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      // Don't stop background location — it persists even when tab is switched
-    };
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, []);
 
-  const totalKm         = journeys.reduce((s, j) => s + j.distanceKm, 0);
-  const totalDeductible = journeys.reduce((s, j) => s + j.deductible, 0);
+  // ── Computed values ─────────────────────────────────────────────────────────
 
-  // ── GPS: Start Journey ────────────────────────────────────────────────────
+  const totalKm            = journeys.filter(j => j.distanceKm > 0).reduce((s, j) => s + j.distanceKm, 0);
+  const totalReimbursement = journeys.reduce((s, j) => s + j.deductible, 0);
+
+  const breakdown = TRAVEL_MODES.reduce<Record<string, number>>((acc, m) => {
+    const sum = journeys.filter(j => j.travelMode === m.id).reduce((s, j) => s + j.deductible, 0);
+    if (sum > 0) acc[m.id] = sum;
+    return acc;
+  }, {});
+  const legacySum = journeys.filter(j => !j.travelMode).reduce((s, j) => s + j.deductible, 0);
+
+  const activeModeConfig = getModeConfig(activeMode);
+  const liveRate         = activeModeConfig.rate ?? 0.55;
+
+  // ── GPS: Start Journey — UNCHANGED logic ────────────────────────────────────
 
   const startGpsJourney = async () => {
     if (!Location) {
-      Alert.alert(t('gpsNotAvailable'), 'Run: npx expo install expo-location');
+      await showDialog(t('gpsNotAvailable'), 'Run: npx expo install expo-location');
       return;
     }
     setGpsError('');
-    // Request permission
-    let fg = await Location.requestForegroundPermissionsAsync();
+    const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== 'granted') {
       setGpsError(t('locationPermissionDenied'));
-      setShowForm(true);
       return;
     }
-    // Try background permission (degrade gracefully if denied)
     try {
       const bg = await Location.requestBackgroundPermissionsAsync();
-      if (bg.status !== 'granted') {
-        setGpsError(t('backgroundLocationDenied'));
-      }
+      if (bg.status !== 'granted') setGpsError(t('backgroundLocationDenied'));
     } catch {}
 
     coordsRef.current = [];
@@ -228,7 +343,6 @@ export default function MileageScreen() {
     setElapsed(0);
     setTracking(true);
 
-    // Persist active journey so background task and restoration can access it
     const active: ActiveJourney = {
       startTime: startRef.current.toISOString(),
       coords: [],
@@ -237,14 +351,10 @@ export default function MileageScreen() {
     };
     await AsyncStorage.setItem(ACTIVE_KEY, JSON.stringify(active));
 
-    // Live timer
     timerRef.current = setInterval(() => {
-      if (startRef.current) {
-        setElapsed(Date.now() - startRef.current.getTime());
-      }
+      if (startRef.current) setElapsed(Date.now() - startRef.current.getTime());
     }, 1000);
 
-    // Background location updates (continues when app is minimised)
     if (Location && TaskManager) {
       try {
         const alreadyRunning = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_TASK).catch(() => false);
@@ -263,24 +373,17 @@ export default function MileageScreen() {
       } catch {}
     }
 
-    // Foreground watch for real-time UI updates
     watchRef.current = await Location.watchPositionAsync(
-      {
-        accuracy: Location.Accuracy.BestForNavigation,
-        timeInterval: 5000,
-        distanceInterval: 10,
-      },
+      { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 5000, distanceInterval: 10 },
       (pos: any) => {
         const coord: Coordinate = { lat: pos.coords.latitude, lng: pos.coords.longitude };
         if (coordsRef.current.length > 0) {
-          const last  = coordsRef.current[coordsRef.current.length - 1];
+          const last = coordsRef.current[coordsRef.current.length - 1];
           distRef.current += haversine(last, coord);
           setLiveKm(Math.round(distRef.current * 100) / 100);
         }
         coordsRef.current.push(coord);
-        const speedMs = pos.coords.speed ?? 0;
-        setLiveSpeed(Math.max(0, Math.round(speedMs * 3.6))); // m/s → km/h
-        // Keep AsyncStorage in sync for background/foreground transitions
+        setLiveSpeed(Math.max(0, Math.round((pos.coords.speed ?? 0) * 3.6)));
         AsyncStorage.getItem(ACTIVE_KEY).then(raw => {
           if (!raw) return;
           try {
@@ -295,13 +398,12 @@ export default function MileageScreen() {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
   };
 
-  // ── GPS: Stop Journey ─────────────────────────────────────────────────────
+  // ── GPS: Stop Journey — uses activeModeRef for rate ─────────────────────────
 
   const stopGpsJourney = async () => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     if (watchRef.current) { watchRef.current.remove?.(); watchRef.current = null; }
 
-    // Stop background location task
     if (Location && TaskManager) {
       try {
         const running = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_TASK).catch(() => false);
@@ -309,7 +411,6 @@ export default function MileageScreen() {
       } catch {}
     }
 
-    // Read final state from AsyncStorage (background task may have added coords)
     try {
       const raw = await AsyncStorage.getItem(ACTIVE_KEY);
       if (raw) {
@@ -322,28 +423,32 @@ export default function MileageScreen() {
 
     setTracking(false);
 
-    const km        = Math.round(distRef.current * 100) / 100;
-    const deductible = Math.round(km * MILEAGE_RATE * 100) / 100;
-    const end       = new Date();
-    const start     = startRef.current ?? end;
+    const mode       = activeModeRef.current;
+    const config     = getModeConfig(mode);
+    const rate       = config.rate ?? 0.55;
+    const km         = Math.round(distRef.current * 100) / 100;
+    const deductible = Math.round(km * rate * 100) / 100;
+    const end        = new Date();
+    const start      = startRef.current ?? end;
 
-    if (km < 0.01) {
-      Alert.alert(t('journeyTooShort'), t('minDistRequired'));
-      return;
-    }
+    if (km < 0.01) { await showDialog(t('journeyTooShort'), t('minDistRequired')); return; }
+
+    const startCoord = coordsRef.current[0];
+    const endCoord   = coordsRef.current.length > 1 ? coordsRef.current[coordsRef.current.length - 1] : null;
+    const [fromName, toName] = await Promise.all([
+      startCoord ? reverseGeocode(startCoord, 'GPS Start') : Promise.resolve('GPS Start'),
+      endCoord   ? reverseGeocode(endCoord,   'GPS End')   : Promise.resolve('GPS End'),
+    ]);
 
     const journey: Journey = {
       id:          genId(),
       date:        start.toISOString().split('T')[0],
-      from:        coordsRef.current[0]
-        ? `${coordsRef.current[0].lat.toFixed(4)},${coordsRef.current[0].lng.toFixed(4)}`
-        : 'GPS Start',
-      to:          coordsRef.current.length > 1
-        ? `${coordsRef.current[coordsRef.current.length - 1].lat.toFixed(4)},${coordsRef.current[coordsRef.current.length - 1].lng.toFixed(4)}`
-        : 'GPS End',
+      from:        fromName,
+      to:          toName,
       purpose:     trackPurpose || 'GPS Journey',
       distanceKm:  km,
       deductible,
+      travelMode:  mode,
       coordinates: coordsRef.current,
       startTime:   start.toISOString(),
       endTime:     end.toISOString(),
@@ -354,37 +459,110 @@ export default function MileageScreen() {
     setJourneys(updated);
     await saveJourneys(updated);
     setTrackPurpose('');
-
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    Alert.alert(
+    await showDialog(
       t('journeySaved'),
-      `${km.toFixed(2)} km · ${formatCurrency(deductible, currency)} ${t('deductible')}\n(${MILEAGE_RATE.toFixed(2)} ${currency}/km)`,
+      `${config.icon} ${config.label} · ${km.toFixed(2)} km\n${formatCurrency(deductible, currency)} ${t('deductible')} (${rate.toFixed(2)} €/km)`,
     );
   };
 
-  // ── Manual: Save Journey ──────────────────────────────────────────────────
+  // ── Manual KM form ──────────────────────────────────────────────────────────
 
-  const resetForm = () => { setMFrom(''); setMTo(''); setMPurpose(''); setMKm(''); setMDate(new Date().toISOString().split('T')[0]); };
+  const resetKmForm = () => {
+    setMFrom(''); setMTo(''); setMPurpose(''); setMKm('');
+    setMDate(new Date().toISOString().split('T')[0]);
+  };
 
   const saveManualJourney = async () => {
     const km = parseFloat(mKm.replace(',', '.'));
-    if (isNaN(km) || km <= 0) { Alert.alert(t('invalidDistance')); return; }
+    if (isNaN(km) || km <= 0) { await showDialog(t('invalidDistance')); return; }
+    const config = getModeConfig(activeMode);
+    const rate   = config.rate ?? 0.55;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const journey: Journey = {
-      id: genId(),
-      date: mDate,
-      from: mFrom || 'Unknown',
-      to: mTo || 'Unknown',
-      purpose: mPurpose || 'Other',
+      id:         genId(),
+      date:       mDate,
+      from:       mFrom || 'Unknown',
+      to:         mTo   || 'Unknown',
+      purpose:    mPurpose || 'Other',
       distanceKm: km,
-      deductible: Math.round(km * MILEAGE_RATE * 100) / 100,
+      deductible: Math.round(km * rate * 100) / 100,
+      travelMode: activeMode,
     };
     const updated = [journey, ...journeys];
     setJourneys(updated);
     await saveJourneys(updated);
-    setShowForm(false);
-    resetForm();
+    setShowKmForm(false);
+    resetKmForm();
   };
+
+  // ── Receipt form ────────────────────────────────────────────────────────────
+
+  const resetReceiptForm = () => {
+    setRFrom(''); setRTo(''); setRAmount(''); setRNotes('');
+    setRDate(new Date().toISOString().split('T')[0]);
+  };
+
+  const saveReceiptJourney = async () => {
+    const amount = parseFloat(rAmount.replace(',', '.'));
+    if (isNaN(amount) || amount <= 0) { await showDialog(t('invalidAmount') || 'Enter a valid amount'); return; }
+    const config = getModeConfig(activeMode);
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const journey: Journey = {
+      id:            genId(),
+      date:          rDate,
+      from:          rFrom || 'Unknown',
+      to:            rTo   || 'Unknown',
+      purpose:       config.label,
+      distanceKm:    0,
+      deductible:    Math.round(amount * 100) / 100,
+      travelMode:    activeMode,
+      receiptAmount: amount,
+      notes:         rNotes || undefined,
+    };
+    const updated = [journey, ...journeys];
+    setJourneys(updated);
+    await saveJourneys(updated);
+    setShowReceiptForm(false);
+    resetReceiptForm();
+  };
+
+  // ── Meal allowance form ─────────────────────────────────────────────────────
+
+  const resetMealForm = () => {
+    setMealHours(''); setMealNotes('');
+    setMealDate(new Date().toISOString().split('T')[0]);
+  };
+
+  const saveMealAllowance = async () => {
+    const hours     = parseFloat(mealHours.replace(',', '.'));
+    if (isNaN(hours) || hours <= 0) { await showDialog(t('invalidDistance')); return; }
+    const allowance = calcMealAllowance(hours);
+    if (allowance === 0) {
+      await showDialog(t('mealUnder6h'), t('mealUnder6hHint'));
+      return;
+    }
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    const journey: Journey = {
+      id:         genId(),
+      date:       mealDate,
+      from:       'Home',
+      to:         'Away',
+      purpose:    `${t('mealAllowance')} (${hours}h)`,
+      distanceKm: 0,
+      deductible: allowance,
+      travelMode: 'meal',
+      hoursAway:  hours,
+      notes:      mealNotes || undefined,
+    };
+    const updated = [journey, ...journeys];
+    setJourneys(updated);
+    await saveJourneys(updated);
+    setShowMealForm(false);
+    resetMealForm();
+  };
+
+  // ── Delete ──────────────────────────────────────────────────────────────────
 
   const deleteJourney = async (id: string) => {
     const idx = await showDialog(t('delete'), t('removeThisJourney'), [
@@ -397,6 +575,47 @@ export default function MileageScreen() {
       await saveJourneys(updated);
     }
   };
+
+  // ── Mode picker helpers ─────────────────────────────────────────────────────
+
+  const openModePicker = () => {
+    setPickerStep('select');
+    setShowModePicker(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  const onModeSelect = (config: ModeConfig) => {
+    syncMode(config.id);
+    if (config.category === 'km') {
+      setPickerStep('km-action');
+    } else if (config.category === 'receipt') {
+      setRDate(new Date().toISOString().split('T')[0]);
+      setShowModePicker(false);
+      setShowReceiptForm(true);
+    } else {
+      setMealDate(new Date().toISOString().split('T')[0]);
+      setShowModePicker(false);
+      setShowMealForm(true);
+    }
+    Haptics.selectionAsync();
+  };
+
+  const closePicker = () => { setShowModePicker(false); setPickerStep('select'); };
+
+  const kmModes      = TRAVEL_MODES.filter(m => m.category === 'km');
+  const receiptModes = TRAVEL_MODES.filter(m => m.category === 'receipt');
+  const allowModes   = TRAVEL_MODES.filter(m => m.category === 'allowance');
+
+  // ── Meal preview helper (IIFE inside JSX avoids extra component) ────────────
+
+  const mealPreview = (() => {
+    const h = parseFloat(mealHours.replace(',', '.'));
+    if (!mealHours || isNaN(h) || h <= 0) return null;
+    const a = calcMealAllowance(h);
+    return { allowance: a, isZero: a === 0 };
+  })();
+
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <View style={{ flex: 1, backgroundColor: COLORS.background }}>
@@ -411,22 +630,25 @@ export default function MileageScreen() {
         </Pressable>
         <Text style={styles.badge}>◆ ScandiNordic Pro ◆</Text>
         <View style={styles.titleRow}>
-          <Text style={styles.title}>{t('mileage')} 🚗</Text>
-          <Pressable style={styles.addBtn} onPress={() => { Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light); setShowForm(true); }}>
+          <Text style={styles.title}>{t('travelEntry')}</Text>
+          <Pressable style={styles.addBtn} onPress={openModePicker}>
             <Feather name="plus" size={18} color={COLORS.primary} />
           </Pressable>
         </View>
         <View style={styles.divider} />
 
-        {/* GPS Error */}
+        {/* GPS permission error */}
         {gpsError ? <Text style={styles.gpsError}>{gpsError}</Text> : null}
 
-        {/* GPS Tracking Panel */}
+        {/* GPS Tracking Panel (active) or Add Entry hint */}
         {tracking ? (
           <View style={styles.trackingCard}>
             <View style={styles.trackingHeader}>
               <View style={styles.trackingDot} />
               <Text style={styles.trackingTitle}>{t('journeyActive').toUpperCase()}</Text>
+              <View style={styles.trackingModeBadge}>
+                <Text style={styles.trackingModeText}>{activeModeConfig.icon} {activeModeConfig.label}</Text>
+              </View>
             </View>
             <View style={styles.trackingStats}>
               <View style={styles.trackingStat}>
@@ -443,7 +665,7 @@ export default function MileageScreen() {
               </View>
               <View style={styles.trackingStat}>
                 <Text style={[styles.trackingStatVal, { color: COLORS.success }]}>
-                  {formatCurrency(Math.round(liveKm * MILEAGE_RATE * 100) / 100, currency)}
+                  {formatCurrency(Math.round(liveKm * liveRate * 100) / 100, currency)}
                 </Text>
                 <Text style={styles.trackingStatLabel}>{t('deductible')}</Text>
               </View>
@@ -461,33 +683,53 @@ export default function MileageScreen() {
             </Pressable>
           </View>
         ) : (
-          <Pressable style={styles.startBtn} onPress={startGpsJourney}>
-            <Feather name="navigation" size={20} color={COLORS.background} />
-            <Text style={styles.startBtnText}>{t('startGpsJourney')}</Text>
+          <Pressable style={styles.addEntryHint} onPress={openModePicker}>
+            <Feather name="plus-circle" size={18} color={COLORS.primary} />
+            <Text style={styles.addEntryHintText}>{t('addTravelEntry')}</Text>
           </Pressable>
         )}
 
-        {/* Summary */}
+        {/* Summary cards */}
         <View style={styles.summaryRow}>
-          <View style={styles.summaryCard}>
-            <Text style={styles.summaryLabel}>{t('totalKm')}</Text>
-            <Text style={[styles.summaryValue, { color: COLORS.primary }]}>{totalKm.toFixed(1)} km</Text>
-          </View>
           <View style={styles.summaryCard}>
             <Text style={styles.summaryLabel}>{t('trips')}</Text>
             <Text style={[styles.summaryValue, { color: COLORS.text }]}>{journeys.length}</Text>
           </View>
           <View style={styles.summaryCard}>
-            <Text style={styles.summaryLabel}>{t('deductible')}</Text>
-            <Text style={[styles.summaryValue, { color: COLORS.success }]}>{formatCurrency(totalDeductible, currency)}</Text>
+            <Text style={styles.summaryLabel}>{t('totalKm')}</Text>
+            <Text style={[styles.summaryValue, { color: COLORS.primary }]}>{totalKm.toFixed(1)} km</Text>
+          </View>
+          <View style={styles.summaryCard}>
+            <Text style={styles.summaryLabel}>{t('totalReimbursement')}</Text>
+            <Text style={[styles.summaryValue, { color: COLORS.success, fontSize: 12 }]}>
+              {formatCurrency(totalReimbursement, currency)}
+            </Text>
           </View>
         </View>
 
-        {/* Rate info */}
-        <View style={styles.rateCard}>
-          <Text style={styles.rateLabel}>{t('taxFreeRate')}</Text>
-          <Text style={styles.rateValue}>{MILEAGE_RATE.toFixed(2)} {currency}/km</Text>
-        </View>
+        {/* Category breakdown */}
+        {(Object.keys(breakdown).length > 0 || legacySum > 0) && (
+          <View style={styles.breakdownCard}>
+            <Text style={styles.breakdownTitle}>{t('categoryBreakdown')}</Text>
+            {Object.entries(breakdown).map(([modeId, sum]) => {
+              const cfg = getModeConfig(modeId as TravelMode);
+              return (
+                <View key={modeId} style={styles.breakdownRow}>
+                  <Text style={styles.breakdownIcon}>{cfg.icon}</Text>
+                  <Text style={styles.breakdownLabel}>{cfg.label}</Text>
+                  <Text style={styles.breakdownAmount}>{formatCurrency(sum, currency)}</Text>
+                </View>
+              );
+            })}
+            {legacySum > 0 && (
+              <View style={styles.breakdownRow}>
+                <Text style={styles.breakdownIcon}>🚗</Text>
+                <Text style={styles.breakdownLabel}>Car (legacy)</Text>
+                <Text style={styles.breakdownAmount}>{formatCurrency(legacySum, currency)}</Text>
+              </View>
+            )}
+          </View>
+        )}
 
         {/* Journey log */}
         <Text style={styles.sectionLabel}>{t('journeyLog')} ({journeys.length})</Text>
@@ -495,31 +737,43 @@ export default function MileageScreen() {
           <View style={styles.empty}>
             <Text style={styles.emptyIcon}>🗺️</Text>
             <Text style={styles.emptyText}>{t('noJourneysYet')}</Text>
-            <Pressable style={styles.emptyBtn} onPress={() => setShowForm(true)}>
-              <Text style={styles.emptyBtnText}>{t('addManually')}</Text>
+            <Pressable style={styles.emptyBtn} onPress={openModePicker}>
+              <Text style={styles.emptyBtnText}>{t('addTravelEntry')}</Text>
             </Pressable>
           </View>
         ) : (
           <View style={styles.list}>
-            {journeys.map((j, i) => (
-              <Pressable
-                key={j.id}
-                style={[styles.journeyRow, i > 0 && { borderTopWidth: 1, borderTopColor: COLORS.border }]}
-                onLongPress={() => deleteJourney(j.id)}
-              >
-                <View style={styles.journeyIcon}>
-                  <Text style={{ fontSize: 16 }}>{j.isGps ? '📡' : '🚗'}</Text>
-                </View>
-                <View style={styles.journeyInfo}>
-                  <Text style={styles.journeyRoute}>{j.from} → {j.to}</Text>
-                  <Text style={styles.journeyMeta}>{j.purpose} · {j.date}{j.isGps ? ' · GPS' : ''}</Text>
-                </View>
-                <View style={styles.journeyRight}>
-                  <Text style={styles.journeyKm}>{j.distanceKm.toFixed(2)} km</Text>
-                  <Text style={styles.journeyDeductible}>{formatCurrency(j.deductible, currency)}</Text>
-                </View>
-              </Pressable>
-            ))}
+            {journeys.map((j, i) => {
+              const cfg       = getModeConfig(j.travelMode);
+              const icon      = j.travelMode ? cfg.icon : (j.isGps ? '📡' : '🚗');
+              const modeLabel = j.travelMode ? cfg.label : (j.isGps ? 'GPS' : 'Car');
+              return (
+                <Pressable
+                  key={j.id}
+                  style={[styles.journeyRow, i > 0 && { borderTopWidth: 1, borderTopColor: COLORS.border }]}
+                  onLongPress={() => deleteJourney(j.id)}
+                >
+                  <View style={styles.journeyIcon}>
+                    <Text style={{ fontSize: 16 }}>{icon}</Text>
+                  </View>
+                  <View style={styles.journeyInfo}>
+                    <Text style={styles.journeyRoute} numberOfLines={1}>{j.from} → {j.to}</Text>
+                    <Text style={styles.journeyMeta}>{modeLabel} · {j.purpose} · {j.date}</Text>
+                    {j.distanceKm > 0 && (
+                      <Text style={styles.journeyKmTag}>{j.distanceKm.toFixed(2)} km</Text>
+                    )}
+                  </View>
+                  <View style={styles.journeyRight}>
+                    <Text style={styles.journeyDeductible}>{formatCurrency(j.deductible, currency)}</Text>
+                    {j.isGps && (
+                      <View style={styles.gpsBadge}>
+                        <Text style={styles.gpsBadgeText}>GPS</Text>
+                      </View>
+                    )}
+                  </View>
+                </Pressable>
+              );
+            })}
           </View>
         )}
 
@@ -527,14 +781,129 @@ export default function MileageScreen() {
         <Text style={styles.version}>◆ ScandiNordic Pro v.2</Text>
       </ScrollView>
 
-      {/* Manual Add Modal */}
-      <Modal visible={showForm} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => { setShowForm(false); resetForm(); }}>
-        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: COLORS.background }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+      {/* ── Mode Picker Modal ──────────────────────────────────────────────── */}
+      <Modal
+        visible={showModePicker}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={closePicker}
+      >
+        <View style={{ flex: 1, backgroundColor: COLORS.background }}>
           <View style={[styles.modalHeader, { paddingTop: insets.top + 16 }]}>
-            <Pressable onPress={() => { setShowForm(false); resetForm(); }}>
+            {pickerStep === 'km-action' ? (
+              <Pressable onPress={() => setPickerStep('select')} hitSlop={10}>
+                <Feather name="arrow-left" size={20} color={COLORS.text} />
+              </Pressable>
+            ) : (
+              <Pressable onPress={closePicker}>
+                <Text style={styles.modalCancel}>{t('cancel')}</Text>
+              </Pressable>
+            )}
+            <Text style={styles.modalTitle}>
+              {pickerStep === 'km-action'
+                ? `${activeModeConfig.icon} ${activeModeConfig.label}`
+                : t('addTravelEntry')}
+            </Text>
+            <View style={{ width: 50 }} />
+          </View>
+
+          {pickerStep === 'select' ? (
+            <ScrollView style={styles.modalBody} showsVerticalScrollIndicator={false}>
+              <Text style={styles.pickerSection}>{t('kmBased')}</Text>
+              <View style={styles.modeGrid}>
+                {kmModes.map(cfg => (
+                  <Pressable
+                    key={cfg.id}
+                    style={styles.modeCard}
+                    onPress={() => onModeSelect(cfg)}
+                  >
+                    <Text style={styles.modeCardIcon}>{cfg.icon}</Text>
+                    <Text style={styles.modeCardLabel}>{cfg.label}</Text>
+                    <Text style={styles.modeCardRate}>{cfg.rateLabel}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={styles.pickerSection}>{t('receiptBased')}</Text>
+              <View style={styles.modeGrid}>
+                {receiptModes.map(cfg => (
+                  <Pressable
+                    key={cfg.id}
+                    style={styles.modeCard}
+                    onPress={() => onModeSelect(cfg)}
+                  >
+                    <Text style={styles.modeCardIcon}>{cfg.icon}</Text>
+                    <Text style={styles.modeCardLabel}>{cfg.label}</Text>
+                    <Text style={styles.modeCardRate}>{cfg.rateLabel}</Text>
+                  </Pressable>
+                ))}
+              </View>
+
+              <Text style={styles.pickerSection}>{t('allowance')}</Text>
+              <View style={styles.modeGrid}>
+                {allowModes.map(cfg => (
+                  <Pressable
+                    key={cfg.id}
+                    style={[styles.modeCard, { borderColor: COLORS.warning + '50' }]}
+                    onPress={() => onModeSelect(cfg)}
+                  >
+                    <Text style={styles.modeCardIcon}>{cfg.icon}</Text>
+                    <Text style={styles.modeCardLabel}>{cfg.label}</Text>
+                    <Text style={[styles.modeCardRate, { color: COLORS.warning }]}>{t('mealRatesHint')}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={{ height: 40 }} />
+            </ScrollView>
+          ) : (
+            /* KM action step — GPS or Manual */
+            <View style={[styles.modalBody, { gap: 16, paddingTop: 28 }]}>
+              <View style={styles.modeActionHero}>
+                <Text style={styles.modeHeroIcon}>{activeModeConfig.icon}</Text>
+                <Text style={styles.modeHeroTitle}>{activeModeConfig.label}</Text>
+                <Text style={styles.modeHeroRate}>{activeModeConfig.rateLabel}</Text>
+              </View>
+              {Location ? (
+                <Pressable
+                  style={styles.primaryActionBtn}
+                  onPress={() => { closePicker(); startGpsJourney(); }}
+                >
+                  <Feather name="navigation" size={18} color={COLORS.background} />
+                  <Text style={styles.primaryActionLabel}>{t('startGpsTracking')}</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                style={styles.secondaryActionBtn}
+                onPress={() => {
+                  closePicker();
+                  setMDate(new Date().toISOString().split('T')[0]);
+                  setShowKmForm(true);
+                }}
+              >
+                <Feather name="edit-2" size={16} color={COLORS.primary} />
+                <Text style={styles.secondaryActionLabel}>{t('enterManually')}</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      </Modal>
+
+      {/* ── Manual KM Form Modal ───────────────────────────────────────────── */}
+      <Modal
+        visible={showKmForm}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => { setShowKmForm(false); resetKmForm(); }}
+      >
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: COLORS.background }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={[styles.modalHeader, { paddingTop: insets.top + 16 }]}>
+            <Pressable onPress={() => { setShowKmForm(false); resetKmForm(); }}>
               <Text style={styles.modalCancel}>{t('cancel')}</Text>
             </Pressable>
-            <Text style={styles.modalTitle}>{t('addManually')}</Text>
+            <Text style={styles.modalTitle}>{activeModeConfig.icon} {activeModeConfig.label}</Text>
             <Pressable onPress={saveManualJourney}>
               <Text style={styles.modalSave}>{t('save')}</Text>
             </Pressable>
@@ -553,7 +922,14 @@ export default function MileageScreen() {
             <View style={styles.twoCol}>
               <View style={{ flex: 1 }}>
                 <Text style={styles.fieldLabel}>{t('distanceKm')}</Text>
-                <TextInput style={styles.input} value={mKm} onChangeText={setMKm} placeholder="0.0" placeholderTextColor={COLORS.muted} keyboardType="decimal-pad" />
+                <TextInput
+                  style={styles.input}
+                  value={mKm}
+                  onChangeText={setMKm}
+                  placeholder="0.0"
+                  placeholderTextColor={COLORS.muted}
+                  keyboardType="decimal-pad"
+                />
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={styles.fieldLabel}>{t('date')}</Text>
@@ -570,85 +946,288 @@ export default function MileageScreen() {
               </View>
             </View>
             <Text style={styles.fieldLabel}>{t('purpose')}</Text>
-            <TextInput style={styles.input} value={mPurpose} onChangeText={setMPurpose} placeholder={t('purposePlaceholder')} placeholderTextColor={COLORS.muted} />
+            <TextInput
+              style={styles.input}
+              value={mPurpose}
+              onChangeText={setMPurpose}
+              placeholder={t('purposePlaceholder')}
+              placeholderTextColor={COLORS.muted}
+            />
             {parseFloat(mKm) > 0 && (
               <View style={styles.deductPreview}>
                 <Text style={styles.deductLabel}>{t('deductible')}</Text>
-                <Text style={styles.deductValue}>{formatCurrency(Math.round(parseFloat(mKm) * MILEAGE_RATE * 100) / 100, currency)}</Text>
+                <Text style={styles.deductValue}>
+                  {formatCurrency(Math.round(parseFloat(mKm.replace(',', '.')) * (activeModeConfig.rate ?? 0.55) * 100) / 100, currency)}
+                </Text>
               </View>
             )}
           </ScrollView>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* ── Receipt Form Modal ─────────────────────────────────────────────── */}
+      <Modal
+        visible={showReceiptForm}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => { setShowReceiptForm(false); resetReceiptForm(); }}
+      >
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: COLORS.background }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={[styles.modalHeader, { paddingTop: insets.top + 16 }]}>
+            <Pressable onPress={() => { setShowReceiptForm(false); resetReceiptForm(); }}>
+              <Text style={styles.modalCancel}>{t('cancel')}</Text>
+            </Pressable>
+            <Text style={styles.modalTitle}>{activeModeConfig.icon} {activeModeConfig.label}</Text>
+            <Pressable onPress={saveReceiptJourney}>
+              <Text style={styles.modalSave}>{t('save')}</Text>
+            </Pressable>
+          </View>
+          <ScrollView style={styles.modalBody} keyboardShouldPersistTaps="handled">
+            <View style={styles.twoCol}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t('from')}</Text>
+                <TextInput style={styles.input} value={rFrom} onChangeText={setRFrom} placeholder="Helsinki" placeholderTextColor={COLORS.muted} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t('to')}</Text>
+                <TextInput style={styles.input} value={rTo} onChangeText={setRTo} placeholder="Vantaa" placeholderTextColor={COLORS.muted} />
+              </View>
+            </View>
+            <View style={styles.twoCol}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t('receiptAmount')}</Text>
+                <TextInput
+                  style={styles.input}
+                  value={rAmount}
+                  onChangeText={setRAmount}
+                  placeholder="0.00"
+                  placeholderTextColor={COLORS.muted}
+                  keyboardType="decimal-pad"
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t('date')}</Text>
+                <Pressable style={[styles.input, { justifyContent: 'center' }]} onPress={() => setShowRDatePicker(true)}>
+                  <Text style={{ color: COLORS.text, fontSize: 13 }}>{rDate}</Text>
+                </Pressable>
+                <DatePickerModal
+                  visible={showRDatePicker}
+                  value={rDate}
+                  onConfirm={d => { setRDate(d); setShowRDatePicker(false); }}
+                  onCancel={() => setShowRDatePicker(false)}
+                  title={t('date')}
+                />
+              </View>
+            </View>
+            <Text style={styles.fieldLabel}>{t('notes')}</Text>
+            <TextInput
+              style={[styles.input, { height: 80, paddingTop: 12, textAlignVertical: 'top' }]}
+              value={rNotes}
+              onChangeText={setRNotes}
+              placeholder={t('notesOptional')}
+              placeholderTextColor={COLORS.muted}
+              multiline
+            />
+            {rAmount && parseFloat(rAmount.replace(',', '.')) > 0 && (
+              <View style={styles.deductPreview}>
+                <Text style={styles.deductLabel}>{t('reimbursement')}</Text>
+                <Text style={styles.deductValue}>
+                  {formatCurrency(parseFloat(rAmount.replace(',', '.')), currency)}
+                </Text>
+              </View>
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      {/* ── Meal Allowance Modal ───────────────────────────────────────────── */}
+      <Modal
+        visible={showMealForm}
+        animationType="slide"
+        presentationStyle="pageSheet"
+        onRequestClose={() => { setShowMealForm(false); resetMealForm(); }}
+      >
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: COLORS.background }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <View style={[styles.modalHeader, { paddingTop: insets.top + 16 }]}>
+            <Pressable onPress={() => { setShowMealForm(false); resetMealForm(); }}>
+              <Text style={styles.modalCancel}>{t('cancel')}</Text>
+            </Pressable>
+            <Text style={styles.modalTitle}>🍽️ {t('mealAllowance')}</Text>
+            <Pressable onPress={saveMealAllowance}>
+              <Text style={styles.modalSave}>{t('save')}</Text>
+            </Pressable>
+          </View>
+          <ScrollView style={styles.modalBody} keyboardShouldPersistTaps="handled">
+            <View style={styles.mealInfoBox}>
+              <Text style={styles.mealInfoRow}>🕐  6h+ → {formatCurrency(MEAL_RATES.sixHour, currency)}</Text>
+              <Text style={styles.mealInfoRow}>🕙 10h+ → {formatCurrency(MEAL_RATES.tenHour, currency)}</Text>
+            </View>
+            <View style={styles.twoCol}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t('hoursAway')}</Text>
+                <TextInput
+                  style={styles.input}
+                  value={mealHours}
+                  onChangeText={setMealHours}
+                  placeholder="8.5"
+                  placeholderTextColor={COLORS.muted}
+                  keyboardType="decimal-pad"
+                />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>{t('date')}</Text>
+                <Pressable style={[styles.input, { justifyContent: 'center' }]} onPress={() => setShowMealDatePicker(true)}>
+                  <Text style={{ color: COLORS.text, fontSize: 13 }}>{mealDate}</Text>
+                </Pressable>
+                <DatePickerModal
+                  visible={showMealDatePicker}
+                  value={mealDate}
+                  onConfirm={d => { setMealDate(d); setShowMealDatePicker(false); }}
+                  onCancel={() => setShowMealDatePicker(false)}
+                  title={t('date')}
+                />
+              </View>
+            </View>
+            <Text style={styles.fieldLabel}>{t('notes')}</Text>
+            <TextInput
+              style={[styles.input, { height: 80, paddingTop: 12, textAlignVertical: 'top' }]}
+              value={mealNotes}
+              onChangeText={setMealNotes}
+              placeholder={t('notesOptional')}
+              placeholderTextColor={COLORS.muted}
+              multiline
+            />
+            {mealPreview && (
+              mealPreview.isZero ? (
+                <View style={[styles.deductPreview, { backgroundColor: COLORS.warningDim, borderColor: COLORS.warning + '30' }]}>
+                  <Text style={[styles.deductLabel, { color: COLORS.warning }]}>{t('mealUnder6h')}</Text>
+                </View>
+              ) : (
+                <View style={styles.deductPreview}>
+                  <Text style={styles.deductLabel}>{t('allowance')}</Text>
+                  <Text style={styles.deductValue}>{formatCurrency(mealPreview.allowance, currency)}</Text>
+                </View>
+              )
+            )}
+          </ScrollView>
+        </KeyboardAvoidingView>
+      </Modal>
+
       {dialog}
     </View>
   );
 }
 
+// ── Styles ────────────────────────────────────────────────────────────────────
+
 const makeStyles = () => StyleSheet.create({
   content: { paddingHorizontal: 20, gap: 12 },
-  back: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+
+  back:     { flexDirection: 'row', alignItems: 'center', gap: 6 },
   backText: { fontSize: 14, color: COLORS.primary, fontWeight: '500' },
-  badge: { fontSize: 9, color: COLORS.primary, letterSpacing: 4, textTransform: 'uppercase' },
+  badge:    { fontSize: 9, color: COLORS.primary, letterSpacing: 4, textTransform: 'uppercase' },
   titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 },
-  title: { fontSize: 24, fontWeight: '700', color: COLORS.text, letterSpacing: -0.5 },
-  addBtn: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.primaryDim, borderWidth: 1, borderColor: COLORS.primary + '40' },
-  divider: { height: 1, backgroundColor: COLORS.border },
+  title:    { fontSize: 24, fontWeight: '700', color: COLORS.text, letterSpacing: -0.5 },
+  addBtn:   { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.primaryDim, borderWidth: 1, borderColor: COLORS.primary + '40' },
+  divider:  { height: 1, backgroundColor: COLORS.border },
 
   gpsError: { fontSize: 11, color: COLORS.warning, backgroundColor: COLORS.warningDim, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: COLORS.warning + '40' },
 
-  // GPS tracking card
-  trackingCard: { backgroundColor: COLORS.card, borderRadius: 16, borderWidth: 1, borderColor: COLORS.danger + '50', padding: 16, gap: 14 },
-  trackingHeader: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  trackingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.danger },
-  trackingTitle: { fontSize: 12, fontWeight: '700', color: COLORS.danger, textTransform: 'uppercase', letterSpacing: 1 },
-  trackingStats: { flexDirection: 'row', gap: 8 },
-  trackingStat: { flex: 1, alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 10, paddingVertical: 10, gap: 2 },
-  trackingStatVal: { fontSize: 15, fontWeight: '700', color: COLORS.text },
-  trackingStatLabel: { fontSize: 9, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.5 },
-  trackingInput: { backgroundColor: COLORS.input, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, color: COLORS.text, fontSize: 13, paddingHorizontal: 12, paddingVertical: 10 },
-  stopBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: COLORS.danger, borderRadius: 12, paddingVertical: 14 },
-  stopBtnText: { fontSize: 13, fontWeight: '700', color: COLORS.background, textTransform: 'uppercase', letterSpacing: 1 },
+  // Tracking card
+  trackingCard:       { backgroundColor: COLORS.card, borderRadius: 16, borderWidth: 1, borderColor: COLORS.danger + '50', padding: 16, gap: 14 },
+  trackingHeader:     { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  trackingDot:        { width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.danger },
+  trackingTitle:      { fontSize: 12, fontWeight: '700', color: COLORS.danger, textTransform: 'uppercase', letterSpacing: 1 },
+  trackingModeBadge:  { marginLeft: 'auto' as any, backgroundColor: COLORS.primaryDim, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1, borderColor: COLORS.primary + '30' },
+  trackingModeText:   { fontSize: 11, color: COLORS.primary, fontWeight: '600' },
+  trackingStats:      { flexDirection: 'row', gap: 8 },
+  trackingStat:       { flex: 1, alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 10, paddingVertical: 10, gap: 2 },
+  trackingStatVal:    { fontSize: 15, fontWeight: '700', color: COLORS.text },
+  trackingStatLabel:  { fontSize: 9, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  trackingInput:      { backgroundColor: COLORS.input, borderRadius: 10, borderWidth: 1, borderColor: COLORS.border, color: COLORS.text, fontSize: 13, paddingHorizontal: 12, paddingVertical: 10 },
+  stopBtn:            { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: COLORS.danger, borderRadius: 12, paddingVertical: 14 },
+  stopBtnText:        { fontSize: 13, fontWeight: '700', color: COLORS.background, textTransform: 'uppercase', letterSpacing: 1 },
 
-  // Start button
-  startBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 16 },
-  startBtnText: { fontSize: 14, fontWeight: '700', color: COLORS.background, textTransform: 'uppercase', letterSpacing: 1 },
+  // Add entry hint (when not tracking)
+  addEntryHint:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: COLORS.primaryDim, borderRadius: 14, paddingVertical: 16, borderWidth: 1, borderColor: COLORS.primary + '40' },
+  addEntryHintText: { fontSize: 14, fontWeight: '600', color: COLORS.primary, letterSpacing: 0.3 },
 
-  summaryRow: { flexDirection: 'row', gap: 8 },
-  summaryCard: { flex: 1, backgroundColor: COLORS.card, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, padding: 12, gap: 4 },
+  // Summary
+  summaryRow:   { flexDirection: 'row', gap: 8 },
+  summaryCard:  { flex: 1, backgroundColor: COLORS.card, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, padding: 12, gap: 4 },
   summaryLabel: { fontSize: 9, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, fontWeight: '600' },
   summaryValue: { fontSize: 14, fontWeight: '700' },
-  rateCard: { backgroundColor: COLORS.card, borderRadius: 12, borderWidth: 1, borderColor: COLORS.primary + '30', flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10 },
-  rateLabel: { fontSize: 11, color: COLORS.muted },
-  rateValue: { fontSize: 13, fontWeight: '700', color: COLORS.primary },
+
+  // Category breakdown
+  breakdownCard:   { backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, padding: 14, gap: 10 },
+  breakdownTitle:  { fontSize: 10, fontWeight: '700', color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 2 },
+  breakdownRow:    { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  breakdownIcon:   { fontSize: 14, width: 22 },
+  breakdownLabel:  { flex: 1, fontSize: 13, color: COLORS.text },
+  breakdownAmount: { fontSize: 13, fontWeight: '700', color: COLORS.success },
+
   sectionLabel: { fontSize: 10, color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 1.5, fontWeight: '600' },
-  list: { backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
-  journeyRow: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 },
-  journeyIcon: { width: 36, height: 36, borderRadius: 10, backgroundColor: COLORS.primaryDim, alignItems: 'center', justifyContent: 'center' },
-  journeyInfo: { flex: 1, gap: 2 },
-  journeyRoute: { fontSize: 13, fontWeight: '600', color: COLORS.text },
-  journeyMeta: { fontSize: 10, color: COLORS.muted },
-  journeyRight: { alignItems: 'flex-end', gap: 2 },
-  journeyKm: { fontSize: 13, fontWeight: '700', color: COLORS.text },
-  journeyDeductible: { fontSize: 11, color: COLORS.success, fontWeight: '600' },
-  empty: { alignItems: 'center', paddingTop: 40, gap: 10 },
-  emptyIcon: { fontSize: 36 },
-  emptyText: { fontSize: 14, color: COLORS.muted },
-  emptyBtn: { backgroundColor: COLORS.primaryDim, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, borderWidth: 1, borderColor: COLORS.primary + '40' },
+
+  // Journey list
+  list:            { backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
+  journeyRow:      { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 },
+  journeyIcon:     { width: 36, height: 36, borderRadius: 10, backgroundColor: COLORS.primaryDim, alignItems: 'center', justifyContent: 'center' },
+  journeyInfo:     { flex: 1, gap: 2 },
+  journeyRoute:    { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  journeyMeta:     { fontSize: 10, color: COLORS.muted },
+  journeyKmTag:    { fontSize: 10, color: COLORS.primary, fontWeight: '600' },
+  journeyRight:    { alignItems: 'flex-end', gap: 4 },
+  journeyDeductible: { fontSize: 13, fontWeight: '700', color: COLORS.success },
+  gpsBadge:        { backgroundColor: COLORS.primaryDim, borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2, borderWidth: 1, borderColor: COLORS.primary + '30' },
+  gpsBadgeText:    { fontSize: 9, color: COLORS.primary, fontWeight: '700', letterSpacing: 0.5 },
+
+  empty:        { alignItems: 'center', paddingTop: 40, gap: 10 },
+  emptyIcon:    { fontSize: 36 },
+  emptyText:    { fontSize: 14, color: COLORS.muted },
+  emptyBtn:     { backgroundColor: COLORS.primaryDim, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, borderWidth: 1, borderColor: COLORS.primary + '40' },
   emptyBtnText: { fontSize: 13, fontWeight: '600', color: COLORS.primary },
-  hint: { fontSize: 10, color: COLORS.muted + '80', textAlign: 'center' },
+
+  hint:    { fontSize: 10, color: COLORS.muted + '80', textAlign: 'center' },
   version: { textAlign: 'center', fontSize: 9, color: COLORS.muted + '60', letterSpacing: 4, marginTop: 8 },
 
-  // Modal
+  // Modal shared
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  modalTitle: { fontSize: 16, fontWeight: '600', color: COLORS.text },
-  modalCancel: { fontSize: 15, color: COLORS.textSecondary },
-  modalSave: { fontSize: 15, fontWeight: '600', color: COLORS.primary },
-  modalBody: { padding: 20 },
-  twoCol: { flexDirection: 'row', gap: 10, marginBottom: 14 },
-  fieldLabel: { fontSize: 10, fontWeight: '600', color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 },
-  input: { backgroundColor: COLORS.card, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, color: COLORS.text, fontSize: 14, paddingHorizontal: 14, height: 48, marginBottom: 0 },
+  modalTitle:  { fontSize: 16, fontWeight: '600', color: COLORS.text },
+  modalCancel: { fontSize: 15, color: COLORS.textSecondary, minWidth: 50 },
+  modalSave:   { fontSize: 15, fontWeight: '600', color: COLORS.primary, minWidth: 50, textAlign: 'right' },
+  modalBody:   { padding: 20 },
+  twoCol:      { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  fieldLabel:  { fontSize: 10, fontWeight: '600', color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 6 },
+  input:       { backgroundColor: COLORS.card, borderRadius: 12, borderWidth: 1, borderColor: COLORS.border, color: COLORS.text, fontSize: 14, paddingHorizontal: 14, height: 48 },
   deductPreview: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: COLORS.successDim, borderRadius: 10, borderWidth: 1, borderColor: COLORS.success + '30', paddingHorizontal: 14, paddingVertical: 10, marginTop: 8 },
-  deductLabel: { fontSize: 12, color: COLORS.success },
-  deductValue: { fontSize: 15, fontWeight: '700', color: COLORS.success },
+  deductLabel:   { fontSize: 12, color: COLORS.success },
+  deductValue:   { fontSize: 15, fontWeight: '700', color: COLORS.success },
+
+  // Mode picker
+  pickerSection: { fontSize: 10, fontWeight: '700', color: COLORS.muted, textTransform: 'uppercase', letterSpacing: 1.5, marginTop: 18, marginBottom: 10 },
+  modeGrid:      { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  modeCard:      { width: '47%', backgroundColor: COLORS.card, borderRadius: 14, borderWidth: 1, borderColor: COLORS.border, padding: 14, gap: 4 },
+  modeCardIcon:  { fontSize: 22 },
+  modeCardLabel: { fontSize: 13, fontWeight: '600', color: COLORS.text },
+  modeCardRate:  { fontSize: 10, color: COLORS.primary, fontWeight: '600' },
+
+  // KM action step
+  modeActionHero: { alignItems: 'center', gap: 8, paddingVertical: 24, backgroundColor: COLORS.card, borderRadius: 18, borderWidth: 1, borderColor: COLORS.border },
+  modeHeroIcon:   { fontSize: 52 },
+  modeHeroTitle:  { fontSize: 22, fontWeight: '700', color: COLORS.text },
+  modeHeroRate:   { fontSize: 14, color: COLORS.primary, fontWeight: '600' },
+  primaryActionBtn:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 16 },
+  primaryActionLabel: { fontSize: 14, fontWeight: '700', color: COLORS.background, textTransform: 'uppercase', letterSpacing: 1 },
+  secondaryActionBtn:   { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: COLORS.primaryDim, borderRadius: 14, paddingVertical: 16, borderWidth: 1, borderColor: COLORS.primary + '40' },
+  secondaryActionLabel: { fontSize: 14, fontWeight: '600', color: COLORS.primary, letterSpacing: 0.3 },
+
+  // Meal allowance
+  mealInfoBox: { backgroundColor: COLORS.warningDim, borderRadius: 12, borderWidth: 1, borderColor: COLORS.warning + '40', padding: 14, gap: 6, marginBottom: 14 },
+  mealInfoRow: { fontSize: 13, color: COLORS.warning, fontWeight: '600' },
 });

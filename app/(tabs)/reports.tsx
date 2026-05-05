@@ -305,7 +305,7 @@ export default function ReportsScreen() {
       <Text style={styles.subTitle}>{t('detailedReports')}</Text>
       <View style={styles.subGrid}>
         {[
-          { label: t('mileage'),      emoji: '🚗', href: '/reports/mileage', color: COLORS.success },
+          { label: t('travelEntry'),   emoji: '🚗', href: '/reports/mileage', color: COLORS.success },
           { label: t('profitAndLoss'),emoji: '📊', href: '/reports/pl',      color: COLORS.primary },
           { label: t('balanceSheet'), emoji: '📒', href: '/reports/balance', color: COLORS.info    },
           { label: t('taxPrepayment'),emoji: '💰', href: '/reports/tax',     color: COLORS.danger  },
@@ -322,6 +322,20 @@ export default function ReportsScreen() {
           </Pressable>
         ))}
       </View>
+
+      {/* Accountant Access */}
+      <Pressable
+        style={({ pressed }) => [styles.accountantCard, pressed && { opacity: 0.75 }]}
+        onPress={() => router.push('/reports/accountant' as any)}
+      >
+        <View style={[styles.subBlob, { backgroundColor: COLORS.accent + '22', top: -10, right: -10, width: 60, height: 60, borderRadius: 30 }]} />
+        <Text style={styles.subEmoji}>🔐</Text>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.subLabel}>Accountant Access</Text>
+          <Text style={styles.accountantCardSub}>Invite & manage accountants</Text>
+        </View>
+        <Feather name="chevron-right" size={14} color={COLORS.muted} />
+      </Pressable>
 
       <Text style={styles.version}>◆ ScandiNordic pro v.2</Text>
     </ScrollView>
@@ -448,4 +462,11 @@ const makeStyles = () => StyleSheet.create({
   subEmoji: { fontSize: 20 },
   subLabel: { fontSize: 11, fontWeight: '600', color: COLORS.text, flex: 1 },
   version: { textAlign: 'center', fontSize: 9, color: COLORS.muted + '80', letterSpacing: 4 },
+  accountantCard: {
+    backgroundColor: COLORS.card, borderRadius: 14,
+    padding: 14, borderWidth: 1, borderColor: COLORS.border,
+    gap: 10, overflow: 'hidden',
+    flexDirection: 'row', alignItems: 'center',
+  },
+  accountantCardSub: { fontSize: 9, color: COLORS.muted, marginTop: 2 },
 });

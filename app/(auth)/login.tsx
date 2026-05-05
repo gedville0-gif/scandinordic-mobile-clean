@@ -43,7 +43,6 @@ export default function LoginScreen() {
     setSocialLoading('google');
     try {
       await signInWithGoogle();
-      router.replace('/(tabs)');
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Google sign-in failed');
     } finally {
@@ -159,6 +158,12 @@ export default function LoginScreen() {
             )}
           </Pressable>
         </View>
+
+        {!isSignUp && (
+          <Pressable onPress={() => router.push('/(auth)/forgot-password')} style={styles.toggleWrap}>
+            <Text style={styles.forgotText}>{t('forgotPassword')}</Text>
+          </Pressable>
+        )}
 
         <Pressable onPress={() => setIsSignUp(v => !v)} style={styles.toggleWrap}>
           <Text style={styles.toggleText}>
@@ -317,6 +322,11 @@ const makeStyles = () => StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: COLORS.primary,
+  },
+  forgotText: {
+    fontSize: 13,
+    fontWeight: '400',
+    color: COLORS.muted,
   },
   version: {
     textAlign: 'center',

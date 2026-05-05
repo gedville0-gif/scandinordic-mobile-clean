@@ -6,6 +6,7 @@ export interface Transaction {
   amount: number;
   description: string;
   category: string;
+  veroCategory?: string;
   date: string;
   vatRate?: number;
   notes?: string;

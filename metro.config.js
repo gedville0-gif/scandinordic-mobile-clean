@@ -1,3 +1,8 @@
 const { getDefaultConfig } = require("expo/metro-config");
 
-module.exports = getDefaultConfig(__dirname);
+const config = getDefaultConfig(__dirname);
+
+// Enable package.json "exports" field resolution for modern packages.
+config.resolver.unstable_enablePackageExports = true;
+
+module.exports = config;

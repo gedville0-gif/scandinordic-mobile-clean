@@ -6,14 +6,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { getTransactions, getSettings } from '@/lib/storage';
+import { getTransactions, getSettings, getUserScopedKey } from '@/lib/storage';
 import { formatCurrency } from '@/lib/currency';
 import type { Transaction, Currency } from '@/lib/types';
 import DatePickerModal from '@/components/DatePickerModal';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 
-const PL_DATES_KEY = 'pl_period_dates';
 
 const PURCHASE_CATS  = new Set(['materials','equipment','groceries','purchases','supplies','fuel']);
 const PAYROLL_CATS   = new Set(['payroll','salary','wages','salaries','staff']);
@@ -42,7 +41,7 @@ export default function PLScreen() {
   const load = useCallback(async () => {
     const [tx, s, savedDates] = await Promise.all([
       getTransactions(), getSettings(),
-      AsyncStorage.getItem(PL_DATES_KEY),
+      getUserScopedKey('pl_period_dates').then(k => AsyncStorage.getItem(k)),
     ]);
     setTransactions(tx);
     setCurrency(s.currency);
@@ -59,7 +58,7 @@ export default function PLScreen() {
     try {
       setStartDate(pendingStart);
       setEndDate(pendingEnd);
-      await AsyncStorage.setItem(PL_DATES_KEY, JSON.stringify({ start: pendingStart, end: pendingEnd }));
+      await AsyncStorage.setItem(await getUserScopedKey('pl_period_dates'), JSON.stringify({ start: pendingStart, end: pendingEnd }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {

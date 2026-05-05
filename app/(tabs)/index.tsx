@@ -114,11 +114,11 @@ export default function DashboardScreen() {
 
   const actions = [
     { label: t('newInvoice'),    emoji: '📄', color: COLORS.accent,   onPress: () => router.push('/(tabs)/invoices') },
-    { label: t('addEntry'),      emoji: '➕', color: COLORS.success,  onPress: () => router.push('/(tabs)/transactions') },
+    { label: 'Sales',             emoji: '📊', color: COLORS.success,  onPress: () => router.push('/sales') },
     { label: t('scanReceipt'),   emoji: '📷', color: COLORS.primary,  onPress: () => router.push('/(tabs)/transactions?action=scan') },
     { label: t('uploadReceipt'), emoji: '📁', color: COLORS.info,     onPress: () => router.push('/(tabs)/transactions?action=upload') },
     { label: t('startJourney'),  emoji: '🚗', color: COLORS.success,  onPress: () => router.push('/reports/mileage') },
-    { label: t('addJourney'),    emoji: '🗺️', color: COLORS.primary,  onPress: () => router.push('/reports/mileage') },
+    { label: 'Sales Report',      emoji: '📑', color: COLORS.primary,  onPress: () => router.push('/sales-report') },
   ];
 
   return (

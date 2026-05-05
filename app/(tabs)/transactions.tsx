@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, Text, ScrollView, StyleSheet, Pressable, TextInput, Modal,
   Alert, RefreshControl, KeyboardAvoidingView, Platform, Switch,
@@ -14,10 +14,10 @@ import { TransactionItem } from '@/components/TransactionItem';
 import { getTransactions, saveTransaction, deleteTransaction, getInvoices, getSettings } from '@/lib/storage';
 import { formatCurrency } from '@/lib/currency';
 import type { Transaction, TransactionType, Currency } from '@/lib/types';
+import { INCOME_CATEGORIES, EXPENSE_CATEGORIES, detectCategory } from '@/constants/categories';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useLocalSearchParams } from 'expo-router';
 import { useAppDialog } from '@/components/AppDialog';
-import { useTheme } from '@/contexts/ThemeContext';
 import DatePickerModal from '@/components/DatePickerModal';
 import { supabase } from '@/lib/supabase';
 import { decode } from 'base64-arraybuffer';
@@ -32,43 +32,27 @@ try { ImagePicker = require('expo-image-picker'); } catch {}
 try { DocumentPicker = require('expo-document-picker'); } catch {}
 try { Papa = require('papaparse'); } catch {}
 
-import { scanWithGoogleVision, type OCRResult } from '@/src/services/googleVisionOCR';
+import { recognizeTextFromMultipleImages, type MLKitResult } from '@/src/services/mlKitTextRecognition';
+import { convertPdfToOptimizedImages, cleanupTempImages } from '@/src/services/pdfToImages';
+import { parseFinnishBankStatement, type ParsedTransaction } from '@/src/services/finnishBankParser';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CATEGORIES_EXPENSE = ['fuel', 'materials', 'transport', 'groceries', 'subscription', 'equipment', 'other'];
 const VAT_PRESETS = [0, 13.5, 14, 25.5];
 
-const CATEGORIES_EXPENSE_DATA = [
-  { key: 'fuel',         icon: 'droplet'        },
-  { key: 'materials',    icon: 'box'            },
-  { key: 'transport',    icon: 'truck'          },
-  { key: 'groceries',    icon: 'shopping-bag'   },
-  { key: 'subscription', icon: 'repeat'         },
-  { key: 'equipment',    icon: 'tool'           },
-  { key: 'other',        icon: 'more-horizontal'},
-];
-
-const CATEGORIES_INCOME_DATA = [
-  { key: 'consulting',   icon: 'briefcase'      },
-  { key: 'development',  icon: 'code'           },
-  { key: 'design',       icon: 'pen-tool'       },
-  { key: 'marketing',    icon: 'trending-up'    },
-  { key: 'sales',        icon: 'dollar-sign'    },
-  { key: 'services',     icon: 'layers'         },
-  { key: 'products',     icon: 'package'        },
-  { key: 'other',        icon: 'more-horizontal'},
-];
-
 function getCatIcon(key: string): string {
-  return [...CATEGORIES_EXPENSE_DATA, ...CATEGORIES_INCOME_DATA].find(c => c.key === key)?.icon ?? 'tag';
+  return [...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES].find(c => c.id === key)?.icon ?? 'tag';
 }
 
-function catLabel(key: string, t: (k: string) => string): string {
-  const catKey = 'cat_' + key;
-  const translated = t(catKey);
-  if (translated !== catKey) return translated;
+function catLabel(key: string, _t?: (k: string) => string): string {
+  const cat = [...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES].find(c => c.id === key);
+  if (cat) return cat.label;
   return key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' ');
+}
+
+function getVeroCategory(categoryId: string, type: TransactionType): string {
+  const cats = type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  return cats.find(c => c.id === categoryId)?.veroCategory ?? 'Unclassified';
 }
 
 function generateId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
@@ -77,6 +61,12 @@ function parseAmount(s: string): number {
   if (!s) return 0;
   const cleaned = s.replace(/[€$£\s]/g, '').replace(',', '.');
   return Math.abs(parseFloat(cleaned) || 0);
+}
+
+function parseSignedAmount(s: string): number {
+  if (!s) return 0;
+  const cleaned = s.replace(/[€$£\s]/g, '').replace(',', '.');
+  return parseFloat(cleaned) || 0;
 }
 
 function parseCsvDate(s: string): string {
@@ -92,6 +82,386 @@ function parseCsvDate(s: string): string {
   return new Date().toISOString().split('T')[0];
 }
 
+// Extracts transaction rows from raw OCR text returned by the google-vision-ocr edge function.
+function parseBankStatementText(rawText: string): Transaction[] {
+  console.log('RAW TEXT START:', rawText.substring(0, 50));
+
+  // Check if rawText is already JSON from Gemini (more robust)
+  const trimmed = rawText.trim();
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === 'object') return [parsed];
+    } catch (e) {
+      console.log('JSON parse failed, attempting recovery:', e);
+
+      // Try to recover from truncated JSON by adding missing closing brackets
+      let fixedJson = trimmed;
+
+      // If it looks like a truncated array, try to close it
+      if (trimmed.startsWith('[') && !trimmed.endsWith(']')) {
+        // Count open braces to estimate how many to close
+        const openBraces = (trimmed.match(/\{/g) || []).length;
+        const closeBraces = (trimmed.match(/\}/g) || []).length;
+        const missingBraces = openBraces - closeBraces;
+
+        // Add missing closing braces and array bracket
+        fixedJson = trimmed + '}'.repeat(Math.max(0, missingBraces)) + ']';
+
+        try {
+          const recoveredParsed = JSON.parse(fixedJson);
+          if (Array.isArray(recoveredParsed)) {
+            console.log('✅ Successfully recovered', recoveredParsed.length, 'transactions from truncated JSON');
+            return recoveredParsed;
+          }
+        } catch (recoveryError) {
+          console.log('JSON recovery failed:', recoveryError);
+        }
+      }
+    }
+  }
+
+  const results: Transaction[] = [];
+
+  // Detect bank type
+  const bankType = detectBankType(rawText);
+  console.log("DETECTED BANK:", bankType);
+
+  function detectBankType(text: string): string {
+    if (/OP|Osuuspankki|omasp/i.test(text)) return 'OP';
+    if (/Nordea|NDEAFIHH/i.test(text)) return 'Nordea';
+    return 'Unknown';
+  }
+
+  function parseAmount(raw: string): number {
+    // Handle Finnish amounts with comma or period decimal separator
+    let s = raw.trim();
+    const negative = s.startsWith("-") || s.startsWith("+") ? s.startsWith("-") : false;
+
+    // Remove all non-numeric except comma and period
+    s = s.replace(/[^\d.,]/g, "");
+
+    // Handle thousands separator vs decimal separator
+    if (s.includes(",") && s.includes(".")) {
+      // Both present - last one is decimal separator
+      const lastComma = s.lastIndexOf(",");
+      const lastPeriod = s.lastIndexOf(".");
+      if (lastComma > lastPeriod) {
+        // Comma is decimal separator
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        // Period is decimal separator
+        s = s.replace(/,/g, "");
+      }
+    } else if (s.includes(",")) {
+      // Only comma - could be thousands or decimal
+      const parts = s.split(",");
+      if (parts.length === 2 && parts[1].length <= 2) {
+        // Decimal separator
+        s = s.replace(",", ".");
+      } else {
+        // Thousands separator
+        s = s.replace(/,/g, "");
+      }
+    }
+
+    const val = parseFloat(s);
+    return isNaN(val) ? 0 : (negative ? -Math.abs(val) : Math.abs(val));
+  }
+
+  function parseDate(raw: string): string | null {
+    // Handle "2 Mar 2026" format (D Mon YYYY)
+    const months: { [key: string]: number } = {
+      Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6,
+      Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12
+    };
+
+    const monthNameMatch = raw?.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})/);
+    if (monthNameMatch) {
+      const day = monthNameMatch[1].padStart(2, '0');
+      const monthName = monthNameMatch[2];
+      const year = monthNameMatch[3];
+      const month = months[monthName];
+      if (month) {
+        const monthStr = month.toString().padStart(2, '0');
+        return `${year}-${monthStr}-${day}`;
+      }
+    }
+
+    // Handle Finnish DD.MM.YYYY format
+    const ddmmyyyy = raw?.match(/(\d{1,2})[.\/-](\d{1,2})[.\/-](\d{4})/);
+    if (ddmmyyyy) {
+      const day = ddmmyyyy[1].padStart(2, '0');
+      const month = ddmmyyyy[2].padStart(2, '0');
+      const year = ddmmyyyy[3];
+      return `${year}-${month}-${day}`;
+    }
+
+    // Handle ISO format
+    const iso = raw?.match(/(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return iso[0];
+
+    return null;
+  }
+
+  function cleanMerchantName(text: string): string {
+    return text
+      .replace(/^\d+\.\d+\.\d+\s*/, "") // Remove date at start
+      .replace(/[+-]?\d+[.,]\d{2}.*$/, "") // Remove amount and everything after
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // Skip cover pages and headers for Nordea
+  function isNordeaCoverPage(lines: string[]): boolean {
+    const firstFewLines = lines.slice(0, 10).join(" ").toLowerCase();
+    return /customer service|statement of acc|page \d+|bic|account number/i.test(firstFewLines);
+  }
+
+  // Check if section has actual transaction data
+  function hasTransactionData(lines: string[]): boolean {
+    return lines.some(line => {
+      const hasDate = /\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4}/.test(line);
+      const hasAmount = /[+-]?\d+[.,]\d{2}/.test(line);
+      return hasDate && hasAmount;
+    });
+  }
+
+  const allLines = rawText.split("\n");
+  console.log("TOTAL RAW LINES:", allLines.length);
+  console.log("FIRST 10 LINES:", allLines.slice(0, 10));
+  console.log("LAST 10 LINES:", allLines.slice(-10));
+
+  // Skip patterns for noise
+  const skipPatterns = [
+    /^\s*$/,
+    /^page \d+/i,
+    /continued/i,
+    /opening balance|closing balance|available balance/i,
+    /customer service/i,
+    /statement of acc/i,
+    /BIC|SWIFT/i,
+    /account number|tilinumero/i,
+    /^total|^summa/i,
+    /^\d+\s*$/  // Just numbers
+  ];
+
+  let processingStarted = false;
+  let linesProcessed = 0;
+  let linesSkipped = 0;
+  let validDateAmountLines = 0;
+
+  for (let i = 0; i < allLines.length; i++) {
+    const line = allLines[i].trim();
+    if (!line) continue;
+
+    // Skip noise patterns
+    if (skipPatterns.some(pattern => pattern.test(line))) {
+      linesSkipped++;
+      continue;
+    }
+
+    linesProcessed++;
+
+    // For Nordea: Skip until we find transaction data
+    if (bankType === 'Nordea' && !processingStarted) {
+      const contextLines = allLines.slice(Math.max(0, i-2), i+3);
+      if (!hasTransactionData(contextLines)) {
+        continue;
+      }
+      processingStarted = true;
+    }
+
+    // Look for transaction patterns
+    let dateMatch = null;
+    let amountMatch = null;
+    let merchant = "";
+
+    if (bankType === 'OP') {
+      // OP format: Multi-line state machine approach
+      // Look for date on current line: "2 Mar 2026"
+      dateMatch = line?.match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4})|(\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})/i);
+
+      if (linesProcessed <= 5) {
+        console.log(`OP STATE MACHINE - Line ${i}: "${line}" | Date found: ${!!dateMatch}`);
+      }
+
+      if (dateMatch) {
+        // Found a date line, look ahead for amount
+        // Line N+1: value date (skip)
+        // Line N+2: amount + description
+        // Line N+3: merchant name
+
+        let amountLine = "";
+        let merchantLine = "";
+
+        // Look for amount in next few lines (skip value date) with bounds checking
+        if (i + 2 < allLines.length) {
+          for (let j = i + 1; j < Math.min(i + 4, allLines.length); j++) {
+            const nextLine = allLines[j].trim();
+            if (!nextLine) continue;
+
+            // Check if this line has an amount at the start
+            const possibleAmount = nextLine?.match(/^([+-]\d+[.,]\d{2})/);
+            if (possibleAmount && !amountLine) {
+              amountLine = nextLine;
+              amountMatch = possibleAmount;
+
+              // Find merchant name - take next valid non-empty line after amount
+              console.log(`OP MERCHANT SEARCH - Amount line j=${j}: "${nextLine}"`);
+              for (let k = j + 1; k < Math.min(j + 5, allLines.length); k++) {
+                const candidateLine = allLines[k]?.trim();
+                console.log(`OP MERCHANT CHECK k=${k}: "${candidateLine}" | Empty: ${!candidateLine}`);
+                if (!candidateLine) continue;
+
+                // Skip unwanted lines
+                const skipPatterns = [
+                  /^MESSAGE$/i,
+                  /^SEPA INSTANT CREDIT TRANSFER$/i,
+                  /^Messag/i,
+                  /^Contact details$/i,
+                  /^BANK TRANSFER$/i,
+                  /^CREDIT TRANSFER$/i,
+                  /^INSTANT TRANSFER$/i,
+                  /^\d+$/,  // Pure numbers
+                  /^[A-Z0-9]{15,}$/i  // Long alphanumeric reference (length > 15)
+                ];
+
+                // Check if this line should be skipped
+                const shouldSkip = skipPatterns.some(pattern => pattern.test(candidateLine));
+                console.log(`OP MERCHANT EVAL k=${k}: "${candidateLine}" | Skip: ${shouldSkip}`);
+
+                if (shouldSkip) {
+                  continue;
+                }
+
+                // Valid merchant found
+                merchantLine = candidateLine;
+                console.log(`OP MERCHANT FOUND: "${merchantLine}"`);
+                break;
+              }
+              break;
+            }
+          }
+        }
+
+        if (amountMatch) {
+          // Use merchant line if available, otherwise fallback to amount line description
+          if (merchantLine) {
+            merchant = cleanMerchantName(merchantLine);
+          } else {
+            // Extract description from amount line (after the amount)
+            merchant = cleanMerchantName(amountLine.replace(/^[+-]\d+[.,]\d{2}\s*/, "").trim());
+          }
+
+          // Additional cleaning for OP merchant names
+          merchant = merchant.trim();
+
+          // Convert ALL CAPS to title case
+          if (merchant === merchant.toUpperCase() && merchant.length > 3) {
+            merchant = merchant.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+          }
+
+          if (!merchant || merchant.length < 2) {
+            merchant = "Bank Transaction";
+          }
+
+          console.log(`OP STATE MACHINE SUCCESS - Date: ${dateMatch[0]} | Amount: ${amountMatch[1]} | Merchant: "${merchant}"`);
+
+          // Create transaction object and add to results
+          const date = parseDate(dateMatch[0]);
+          if (date) {
+            const amount = parseAmount(amountMatch[1]);
+            if (amount !== 0) {
+              results.push({
+                id: date + "_" + Math.random().toString(36).slice(2, 7),
+                date,
+                description: merchant || "Bank Transaction",
+                amount,
+                type: amount < 0 ? "expense" : "income",
+                category: "Other",
+              });
+              console.log(`OP TRANSACTION ADDED - Date: ${date} | Amount: ${amount} | Merchant: "${merchant}"`);
+            }
+          }
+
+          // Skip ahead past the processed lines
+          i = Math.min(i + 3, allLines.length - 1);
+        } else {
+          console.log(`OP STATE MACHINE - Date found but no amount in next lines`);
+        }
+      }
+    } else if (bankType === 'Nordea') {
+      // Nordea format: more flexible matching
+      dateMatch = line?.match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4})/);
+      amountMatch = line?.match(/([-+]?\d+[.,]\d{2})/);
+    } else {
+      // Generic fallback
+      dateMatch = line?.match(/(\d{1,2}[.\/-]\d{1,2}[.\/-]\d{4})/);
+      amountMatch = line?.match(/([-+]?\d+[.,]\d{2})/);
+    }
+
+    // Must have both date and amount for valid transaction
+    if (!dateMatch || !amountMatch) {
+      if (linesProcessed <= 10) { // Log first 10 processed lines for debugging
+        console.log(`LINE ${i}: NO DATE/AMOUNT MATCH - "${line}" | Date: ${!!dateMatch} | Amount: ${!!amountMatch}`);
+      }
+      continue;
+    }
+
+    validDateAmountLines++;
+
+    const date = parseDate(dateMatch[1]);
+    if (!date) continue;
+
+    const amount = parseAmount(amountMatch[1]);
+    if (amount === 0) continue;
+
+    // Extract merchant/description (OP already extracted, others use line parsing)
+    if (bankType !== 'OP') {
+      merchant = line
+        .replace(dateMatch[0], "")
+        .replace(amountMatch[0], "")
+        .trim();
+
+      // Clean up merchant name
+      merchant = cleanMerchantName(merchant);
+
+      // If merchant is too short, try next line
+      if (merchant.length < 3 && i + 1 < allLines.length) {
+        const nextLine = allLines[i + 1].trim();
+        if (nextLine && !skipPatterns.some(pattern => pattern.test(nextLine))) {
+          merchant = cleanMerchantName(nextLine);
+        }
+      }
+    }
+
+    if (!merchant || merchant.length < 2) {
+      merchant = "Bank Transaction";
+    }
+
+    results.push({
+      id: date + "_" + Math.random().toString(36).slice(2, 7),
+      date,
+      description: merchant,
+      amount,
+      type: amount < 0 ? "expense" : "income",
+      category: "Other",
+    });
+
+    console.log("EXTRACTED:", { date, amount, merchant, raw: line });
+  }
+
+  console.log("=== BANK PARSER SUMMARY ===");
+  console.log("Lines processed:", linesProcessed);
+  console.log("Lines skipped:", linesSkipped);
+  console.log("Lines with valid date/amount:", validDateAmountLines);
+  console.log("TOTAL TRANSACTIONS FOUND:", results.length);
+  console.log("===========================");
+  return results;
+}
+
 // ─── Add Transaction Modal ────────────────────────────────────────────────────
 
 interface AddModalProps {
@@ -105,13 +475,12 @@ interface AddModalProps {
 function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
   const modalStyles = makeModalStyles();
   const insets = useSafeAreaInsets();
-  const { mode } = useTheme();
   const { show: showDialog, dialog } = useAppDialog();
   const color = type === 'income' ? COLORS.success : COLORS.danger;
 
   const [desc, setDesc] = useState('');
   const [amount, setAmount] = useState('');
-  const [category, setCategory] = useState(() => type === 'income' ? 'consulting' : 'fuel');
+  const [category, setCategory] = useState(() => type === 'income' ? 'consulting_services' : 'fuel');
   const [vatRate, setVatRate] = useState('25.5');
   const [vatIncluded, setVatIncluded] = useState(false);
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
@@ -123,6 +492,14 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
   const [catSearch, setCatSearch] = useState('');
   const [showCustomInput, setShowCustomInput] = useState(false);
   const [customInputText, setCustomInputText] = useState('');
+  const [categoryManuallySet, setCategoryManuallySet] = useState(false);
+  const saveGuard = useRef(false);
+
+  useEffect(() => {
+    if (categoryManuallySet || !desc.trim()) return;
+    const detected = detectCategory(desc, type);
+    if (detected) setCategory(detected);
+  }, [desc, categoryManuallySet, type]);
 
   const amt = parseFloat(amount.replace(',', '.')) || 0;
   const vp = parseFloat(vatRate) || 0;
@@ -134,21 +511,25 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
   }
 
   const reset = () => {
+    saveGuard.current = false;
     setDesc(''); setAmount('');
-    setCategory(type === 'income' ? 'consulting' : 'fuel');
+    setCategory(type === 'income' ? 'consulting_services' : 'fuel');
     setVatRate('25.5');
     setVatIncluded(false); setDate(new Date().toISOString().split('T')[0]);
     setClientName(''); setStatus('paid'); setNote('');
     setShowCatSheet(false); setCatSearch('');
     setShowCustomInput(false); setCustomInputText('');
+    setCategoryManuallySet(false);
   };
 
   const handleSave = () => {
+    if (saveGuard.current) return;
     if (!desc.trim() || !amount) {
       showDialog('Missing fields', 'Please fill in title and amount.');
       return;
     }
     if (isNaN(amt) || amt <= 0) { showDialog('Invalid amount'); return; }
+    saveGuard.current = true;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     onSave({
       id: generateId(),
@@ -156,6 +537,7 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
       amount: netAmt,
       description: desc.trim(),
       category: category,
+      veroCategory: getVeroCategory(category, type),
       date: date || new Date().toISOString().split('T')[0],
       vatRate: vp,
       clientName: type === 'income' ? clientName : undefined,
@@ -281,7 +663,7 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
         {/* Category bottom sheet */}
         <Modal visible={showCatSheet} transparent animationType="slide" onRequestClose={() => setShowCatSheet(false)}>
           <View style={{ flex: 1, justifyContent: 'flex-end' }}>
-            <Pressable style={[StyleSheet.absoluteFillObject, { backgroundColor: mode === 'dark' ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.4)' }]} onPress={() => setShowCatSheet(false)} />
+            <Pressable style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(0,0,0,0.85)' }]} onPress={() => setShowCatSheet(false)} />
             <View style={[modalStyles.sheet, { paddingBottom: insets.bottom + 16 }]}>
               <View style={modalStyles.sheetHandle} />
               <Text style={modalStyles.sheetTitle}>{t('category')}</Text>
@@ -297,27 +679,21 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
                 />
               </View>
               <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-                {(type === 'income' ? CATEGORIES_INCOME_DATA : CATEGORIES_EXPENSE_DATA)
-                  .filter(c => catSearch === '' || catLabel(c.key, t).toLowerCase().includes(catSearch.toLowerCase()))
+                {(type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)
+                  .filter(c => catSearch === '' || catLabel(c.id, t).toLowerCase().includes(catSearch.toLowerCase()))
                   .map(c => {
-                    const selected = category === c.key || (c.key === 'other' && !CATEGORIES_EXPENSE_DATA.concat(CATEGORIES_INCOME_DATA).some(d => d.key === category) && category !== 'other');
+                    const selected = category === c.id;
                     return (
                       <Pressable
-                        key={c.key}
+                        key={c.id}
                         style={[modalStyles.sheetItem, selected && { backgroundColor: color + '15' }]}
                         onPress={() => {
-                          if (c.key === 'other') {
-                            setShowCatSheet(false);
-                            setCustomInputText('');
-                            setShowCustomInput(true);
-                          } else {
-                            setCategory(c.key); setCatSearch(''); setShowCatSheet(false); Haptics.selectionAsync();
-                          }
+                          setCategory(c.id); setCategoryManuallySet(true); setCatSearch(''); setShowCatSheet(false); Haptics.selectionAsync();
                         }}
                       >
                         <Feather name={c.icon as any} size={16} color={selected ? color : COLORS.muted} />
                         <Text style={[modalStyles.sheetItemText, selected && { color, fontWeight: '600' }]}>
-                          {catLabel(c.key, t)}
+                          {catLabel(c.id, t)}
                         </Text>
                         {selected && <Feather name="check" size={15} color={color} />}
                       </Pressable>
@@ -330,7 +706,7 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
 
         {/* Custom category input */}
         <Modal visible={showCustomInput} transparent animationType="fade" onRequestClose={() => setShowCustomInput(false)}>
-          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: mode === 'dark' ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.4)' }}>
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: 'rgba(0,0,0,0.85)' }}>
             <Pressable style={modalStyles.customInputBox} onPress={e => e.stopPropagation()}>
               <Text style={modalStyles.customInputTitle}>{t('customCategory')}</Text>
               <TextInput
@@ -385,7 +761,6 @@ interface ReceiptReviewModalProps {
 function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t }: ReceiptReviewModalProps) {
   const modalStyles = makeModalStyles();
   const insets = useSafeAreaInsets();
-  const { mode } = useTheme();
   const { show: showDialog, dialog } = useAppDialog();
   const [desc, setDesc] = useState('');
   const [amount, setAmount] = useState('');
@@ -401,6 +776,10 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
   const [scanning, setScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [confidence, setConfidence] = useState<number | null>(null);
+
+  const ocrLowConfidence = confidence !== null && !scanning && confidence <= 0.8;
+  const amtNum = parseFloat(amount.replace(',', '.'));
+  const saveDisabled = !amount.trim() || isNaN(amtNum) || amtNum <= 0;
 
   // Reset all fields when modal opens
   useEffect(() => {
@@ -422,7 +801,9 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
     setScanError(null);
     setConfidence(null);
 
-    scanWithGoogleVision(imageUri, imageBase64)
+    // Image OCR temporarily disabled - use PDF import instead
+    // TODO: Implement image OCR with ML Kit
+    Promise.resolve({ error: 'Image OCR not available - use PDF import instead' })
       .then((result: any) => {
         if (cancelled) return;
 
@@ -484,7 +865,7 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
       }
     }
 
-    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, date: dateStr, vatRate: vp, note: note || undefined, receipt_url });
+    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, veroCategory: getVeroCategory(category, 'expense'), date: dateStr, vatRate: vp, note: note || undefined, receipt_url });
     onClose();
   };
 
@@ -494,7 +875,7 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
         <View style={[modalStyles.header, { paddingTop: insets.top + 16 }]}>
           <Pressable onPress={onClose}><Text style={modalStyles.cancel}>{t('cancel')}</Text></Pressable>
           <Text style={{ color: COLORS.text, fontWeight: '600', fontSize: 15 }}>{t('reviewReceipt')}</Text>
-          <Pressable onPress={handleSave}><Text style={[modalStyles.save, { color: COLORS.danger }]}>{t('save')}</Text></Pressable>
+          <Pressable onPress={handleSave} disabled={saveDisabled}><Text style={[modalStyles.save, { color: saveDisabled ? COLORS.muted : COLORS.danger }]}>{t('save')}</Text></Pressable>
         </View>
         <ScrollView style={modalStyles.body} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           {/* Receipt image + scanning overlay */}
@@ -559,6 +940,9 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
             <View style={modalStyles.colHalf}>
               <Text style={modalStyles.label}>{t('netAmount')}</Text>
               <TextInput style={modalStyles.input} placeholder="0.00" placeholderTextColor={COLORS.muted} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+              {saveDisabled && !scanning && (
+                <Text style={{ color: COLORS.danger, fontSize: 11, marginTop: 4 }}>Please enter a valid amount</Text>
+              )}
             </View>
             <View style={modalStyles.colHalf}>
               <Text style={modalStyles.label}>{t('date')}</Text>
@@ -609,7 +993,7 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
         {/* Category bottom sheet */}
         <Modal visible={showCatSheet} transparent animationType="slide" onRequestClose={() => setShowCatSheet(false)}>
           <View style={{ flex: 1, justifyContent: 'flex-end' }}>
-            <Pressable style={[StyleSheet.absoluteFillObject, { backgroundColor: mode === 'dark' ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.4)' }]} onPress={() => setShowCatSheet(false)} />
+            <Pressable style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(0,0,0,0.85)' }]} onPress={() => setShowCatSheet(false)} />
             <View style={[modalStyles.sheet, { paddingBottom: insets.bottom + 16 }]}>
               <View style={modalStyles.sheetHandle} />
               <Text style={modalStyles.sheetTitle}>{t('category')}</Text>
@@ -625,27 +1009,21 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
                 />
               </View>
               <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
-                {CATEGORIES_EXPENSE_DATA
-                  .filter(c => catSearch === '' || catLabel(c.key, t).toLowerCase().includes(catSearch.toLowerCase()))
+                {EXPENSE_CATEGORIES
+                  .filter(c => catSearch === '' || catLabel(c.id, t).toLowerCase().includes(catSearch.toLowerCase()))
                   .map(c => {
-                    const selected = category === c.key;
+                    const selected = category === c.id;
                     return (
                       <Pressable
-                        key={c.key}
+                        key={c.id}
                         style={[modalStyles.sheetItem, selected && { backgroundColor: COLORS.danger + '15' }]}
                         onPress={() => {
-                          if (c.key === 'other') {
-                            setShowCatSheet(false);
-                            setCustomInputText('');
-                            setShowCustomInput(true);
-                          } else {
-                            setCategory(c.key); setCatSearch(''); setShowCatSheet(false); Haptics.selectionAsync();
-                          }
+                          setCategory(c.id); setCatSearch(''); setShowCatSheet(false); Haptics.selectionAsync();
                         }}
                       >
                         <Feather name={c.icon as any} size={16} color={selected ? COLORS.danger : COLORS.muted} />
                         <Text style={[modalStyles.sheetItemText, selected && { color: COLORS.danger, fontWeight: '600' }]}>
-                          {catLabel(c.key, t)}
+                          {catLabel(c.id, t)}
                         </Text>
                         {selected && <Feather name="check" size={15} color={COLORS.danger} />}
                       </Pressable>
@@ -658,7 +1036,7 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
 
         {/* Custom category input */}
         <Modal visible={showCustomInput} transparent animationType="fade" onRequestClose={() => setShowCustomInput(false)}>
-          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: mode === 'dark' ? 'rgba(0,0,0,0.85)' : 'rgba(0,0,0,0.4)' }}>
+          <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 32, backgroundColor: 'rgba(0,0,0,0.85)' }}>
             <Pressable style={modalStyles.customInputBox} onPress={e => e.stopPropagation()}>
               <Text style={modalStyles.customInputTitle}>{t('customCategory')}</Text>
               <TextInput
@@ -782,6 +1160,126 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
     setLoading(false);
   };
 
+  const handlePdfImport = async () => {
+    if (!DocumentPicker) {
+      showDialog('Package missing', 'expo-document-picker is required.');
+      return;
+    }
+    setLoading(true);
+    setError('');
+
+    let tempImageUris: string[] = [];
+
+    try {
+      console.log('📄 Starting ML Kit PDF import process');
+
+      // Step 1: Pick PDF file
+      const res = await DocumentPicker.getDocumentAsync({
+        type: 'application/pdf',
+        copyToCacheDirectory: true,
+      });
+
+      if (res.canceled) {
+        setLoading(false);
+        return;
+      }
+
+      console.log('✅ PDF selected:', res.assets[0].name);
+
+      // Step 2: Convert PDF to images
+      console.log('🔄 Converting PDF to images...');
+      const pdfResult = await convertPdfToOptimizedImages(res.assets[0].uri);
+
+      if (pdfResult.error) {
+        throw new Error(pdfResult.error);
+      }
+
+      if (pdfResult.imageUris.length === 0) {
+        throw new Error('No pages found in PDF');
+      }
+
+      tempImageUris = pdfResult.imageUris;
+      console.log('✅ PDF converted to', pdfResult.imageUris.length, 'images');
+
+      // Step 3: Run ML Kit text recognition on all images
+      console.log('🔄 Running ML Kit text recognition...');
+      const mlKitResult = await recognizeTextFromMultipleImages(pdfResult.imageUris);
+
+      if (mlKitResult.error) {
+        throw new Error(mlKitResult.error);
+      }
+
+      const rawText = mlKitResult.rawText;
+      console.log('✅ ML Kit extraction complete - Length:', rawText.length);
+      console.log('📝 First 300 chars:', rawText.substring(0, 300));
+
+      // Debug alert showing extraction info
+      alert(`ML Kit PDF Processing Complete!\n\nText extracted: ${mlKitResult.debug_text_length} chars\nMethod: On-device ML Kit\nPages processed: ${pdfResult.pageCount}\n\nFirst 300 chars:\n${rawText.substring(0, 300)}`);
+
+      // Step 4: Parse transactions using Finnish bank parser
+      console.log('🔄 Parsing Finnish bank statement...');
+      const parseResult = parseFinnishBankStatement(rawText);
+
+      if (parseResult.totalFound === 0) {
+        let message = `Could not detect any transactions in this PDF.\n\nBank detected: ${parseResult.bankType}\nText extracted: ${mlKitResult.debug_text_length} chars`;
+
+        if (mlKitResult.debug_text_length === 0) {
+          message += '\n\nThe PDF may be password-protected or contain only images without text.';
+        } else if (mlKitResult.debug_text_length < 100) {
+          message += '\n\nVery little text was found. The PDF may be low quality or contain mostly images.';
+        } else {
+          message += '\n\nText was found but no recognizable transaction patterns were detected.';
+        }
+
+        await showDialog('No transactions found', message);
+        return;
+      }
+
+      // Step 5: Convert to app transaction format
+      const txs: Transaction[] = parseResult.transactions.map(parsed => ({
+        id: generateId(),
+        type: parsed.type,
+        amount: parsed.amount,
+        description: parsed.description,
+        category: parsed.category,
+        veroCategory: parsed.veroCategory || 'Other deductible expenses',
+        date: parsed.date,
+        vatRate: 0,
+      }));
+
+      console.log('✅ Transactions parsed:', txs.length);
+      console.log('📊 Income:', parseResult.incomeCount, 'Expense:', parseResult.expenseCount);
+
+      // Step 6: Show confirmation dialog
+      const idx = await showDialog(
+        `Import ${parseResult.totalFound} transaction${parseResult.totalFound === 1 ? '' : 's'}?`,
+        `Bank: ${parseResult.bankType}\n${parseResult.incomeCount} income · ${parseResult.expenseCount} expense · 0% VAT`,
+        [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${parseResult.totalFound}` }]
+      );
+
+      if (idx === 1) {
+        console.log('✅ User confirmed import');
+        onBulkSave(txs);
+        onClose();
+      }
+
+    } catch (e: any) {
+      console.log('❌ PDF import error:', e?.message);
+      setError('PDF import failed: ' + (e?.message ?? 'Unknown error'));
+    } finally {
+      // Clean up temporary image files
+      if (tempImageUris.length > 0) {
+        try {
+          await cleanupTempImages(tempImageUris);
+          console.log('🗑️ Temp files cleaned up');
+        } catch (cleanupError) {
+          console.log('⚠️ Cleanup error:', cleanupError);
+        }
+      }
+      setLoading(false);
+    }
+  };
+
   // Get up to 3 non-empty sample values for a raw column key
   const getSamples = (col: string): string => {
     const vals = rows.slice(0, 10).map(r => (r[col] || '').trim()).filter(Boolean);
@@ -791,29 +1289,37 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
   const canPreview = !!mapping.desc && !!mapping.amount;
 
   const importAll = async () => {
-    const txs: Transaction[] = (rows as Record<string, string>[])
-      .map(row => {
-        const amt = parseAmount(row[mapping.amount] ?? '');
-        if (amt <= 0) return null;
+    const txs = (rows as Record<string, string>[])
+      .map((row): Transaction | null => {
+        const signedAmt = parseSignedAmount(row[mapping.amount] ?? '');
+        if (signedAmt === 0) return null;
+        const txType: TransactionType = signedAmt < 0 ? 'expense' : 'income';
+        const amt = Math.abs(signedAmt);
+        const desc = (row[mapping.desc] ?? '').trim() || (txType === 'income' ? 'Imported income' : 'Imported expense');
+        const csvCat = mapping.category && row[mapping.category] ? row[mapping.category].trim().toLowerCase() : '';
+        const catId = csvCat || detectCategory(desc, txType) || (txType === 'income' ? 'consulting_services' : 'fuel');
         return {
           id: generateId(),
-          type,
+          type: txType,
           amount: amt,
-          description: (row[mapping.desc] ?? '').trim() || (type === 'income' ? 'Imported income' : 'Imported expense'),
-          category: (mapping.category && row[mapping.category] ? row[mapping.category].trim().toLowerCase() : 'other') || 'other',
+          description: desc,
+          category: catId,
+          veroCategory: getVeroCategory(catId, txType),
           date: parseCsvDate(row[mapping.date] ?? ''),
           vatRate: 0,
-        } satisfies Transaction;
+        };
       })
       .filter((tx): tx is Transaction => tx !== null);
 
     if (txs.length === 0) {
-      showDialog('No valid rows', 'Could not parse any rows with a valid amount > 0.');
+      showDialog('No valid rows', 'Could not parse any rows with a valid amount.');
       return;
     }
+    const incomeCount  = txs.filter(tx => tx.type === 'income').length;
+    const expenseCount = txs.filter(tx => tx.type === 'expense').length;
     const idx = await showDialog(
       `Import ${txs.length} transactions?`,
-      `${txs.length} ${type === 'income' ? 'income' : 'expense'} entries will be added with 0% VAT.`,
+      `${incomeCount} income, ${expenseCount} expense. Type auto-detected from amount sign. 0% VAT.`,
       [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${txs.length}` }]
     );
     if (idx === 1) { onBulkSave(txs); onClose(); }
@@ -876,12 +1382,20 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
               {loading
                 ? <ActivityIndicator color={COLORS.primary} size="large" />
                 : (
-                  <Pressable
-                    style={{ backgroundColor: COLORS.primary, paddingHorizontal: 32, paddingVertical: 14, borderRadius: 14 }}
-                    onPress={pickFile}
-                  >
-                    <Text style={{ color: COLORS.background, fontWeight: '700', fontSize: 15 }}>{t('selectCsvFile')}</Text>
-                  </Pressable>
+                  <View style={{ flexDirection: 'row', gap: 12 }}>
+                    <Pressable
+                      style={{ flex: 1, backgroundColor: COLORS.primary, paddingHorizontal: 24, paddingVertical: 14, borderRadius: 14, alignItems: 'center' }}
+                      onPress={pickFile}
+                    >
+                      <Text style={{ color: COLORS.background, fontWeight: '700', fontSize: 15 }}>{t('selectCsvFile')}</Text>
+                    </Pressable>
+                    <Pressable
+                      style={{ flex: 1, backgroundColor: COLORS.card, paddingHorizontal: 24, paddingVertical: 14, borderRadius: 14, alignItems: 'center', borderWidth: 1, borderColor: COLORS.border }}
+                      onPress={handlePdfImport}
+                    >
+                      <Text style={{ color: COLORS.primary, fontWeight: '700', fontSize: 15 }}>Import PDF</Text>
+                    </Pressable>
+                  </View>
                 )
               }
               <View style={{ backgroundColor: COLORS.card, borderRadius: 12, padding: 14, borderWidth: 1, borderColor: COLORS.border, width: '100%', gap: 6 }}>
@@ -1016,7 +1530,7 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
               <View style={{ marginTop: 20, backgroundColor: COLORS.infoDim, borderRadius: 10, padding: 12, flexDirection: 'row', gap: 8 }}>
                 <Feather name="info" size={14} color={COLORS.info} />
                 <Text style={{ color: COLORS.info, fontSize: 12, flex: 1, lineHeight: 17 }}>
-                  All rows will be imported as {type === 'income' ? 'income' : 'expenses'} with 0% VAT. You can edit individual entries after import.
+                  Positive amounts → income, negative → expense. Category auto-detected from description. All rows imported with 0% VAT.
                 </Text>
               </View>
             </>
@@ -1240,8 +1754,9 @@ export default function EarningsScreen() {
           try {
             const result = await ImagePicker.launchCameraAsync({
               mediaTypes: ['images'],
-              quality: 0.8,
+              quality: 0.5,
               allowsEditing: false,
+              exif: false,
               base64: true,
             });
             if (!result.canceled && result.assets?.[0]) {
@@ -1330,8 +1845,9 @@ export default function EarningsScreen() {
     try {
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ['images'],
-        quality: 0.8,
+        quality: 0.5,
         allowsEditing: false,
+        exif: false,
         base64: true,
       });
       if (!result.canceled && result.assets?.[0]) {
@@ -1364,8 +1880,9 @@ export default function EarningsScreen() {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images'],
-        quality: 0.8,
+        quality: 0.5,
         allowsEditing: false,
+        exif: false,
       });
       if (!result.canceled && result.assets?.[0]) {
         setReviewUri(result.assets[0].uri);
@@ -1402,8 +1919,56 @@ export default function EarningsScreen() {
   const yearIncome = useMemo(() => yearTx.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0), [yearTx]);
   const yearExpense = useMemo(() => yearTx.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0), [yearTx]);
 
-  const filtered = transactions.filter(tx => tx.type === activeTab);
+  const filtered = useMemo(() => transactions.filter(tx => tx.type === activeTab), [transactions, activeTab]);
   const tabColor = activeTab === 'income' ? COLORS.success : COLORS.danger;
+
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, [activeTab]);
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const handleLongPress = useCallback((tx: Transaction) => {
+    if (!selectMode) {
+      setSelectMode(true);
+      setSelectedIds(new Set([tx.id]));
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    }
+  }, [selectMode]);
+
+  const handleToggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) { next.delete(id); } else { next.add(id); }
+      return next;
+    });
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    setSelectedIds(new Set(filtered.map(tx => tx.id)));
+    Haptics.selectionAsync();
+  }, [filtered]);
+
+  const handleDeleteSelected = useCallback(async () => {
+    const count = selectedIds.size;
+    const idx = await showDialog(
+      `Delete ${count} transaction${count !== 1 ? 's' : ''}?`,
+      'This cannot be undone.',
+      [{ text: t('cancel'), style: 'cancel' }, { text: t('delete'), style: 'destructive' }]
+    );
+    if (idx === 1) {
+      for (const id of selectedIds) { await deleteTransaction(id); }
+      await load();
+      exitSelectMode();
+    }
+  }, [selectedIds, t, showDialog, load, exitSelectMode]);
 
   const statCards = [
     { label: t('totalIncome'), value: formatCurrency(totalIncomeAll, currency), color: COLORS.success, icon: 'trending-up', onPress: () => setActiveTab('income') },
@@ -1528,12 +2093,51 @@ export default function EarningsScreen() {
           ) : (
             <View style={styles.list}>
               {filtered.map(tx => (
-                <TransactionItem key={tx.id} item={tx} currency={currency} onPress={() => handleDelete(tx.id)} onReceiptPress={tx.receipt_url ? (url) => setReceiptViewUrl(url) : undefined} />
+                <TransactionItem
+                  key={tx.id}
+                  item={tx}
+                  currency={currency}
+                  selectMode={selectMode}
+                  selected={selectedIds.has(tx.id)}
+                  onPress={() => selectMode ? handleToggleSelect(tx.id) : handleDelete(tx.id)}
+                  onLongPress={() => handleLongPress(tx)}
+                  onReceiptPress={tx.receipt_url ? (url) => setReceiptViewUrl(url) : undefined}
+                />
               ))}
             </View>
           )}
         </View>
       </ScrollView>
+
+      {selectMode && (
+        <View style={[styles.selectBar, { paddingTop: insets.top }]}>
+          <Pressable
+            style={({ pressed }) => [styles.selectBarLeft, pressed && { opacity: 0.7 }]}
+            onPress={exitSelectMode}
+          >
+            <Feather name="x" size={18} color={COLORS.text} />
+            <Text style={styles.selectBarCancelText}>Cancel</Text>
+          </Pressable>
+          <Text style={styles.selectBarCount}>{selectedIds.size} selected</Text>
+          <Pressable
+            style={({ pressed }) => [styles.selectBarAllBtn, pressed && { opacity: 0.7 }]}
+            onPress={handleSelectAll}
+          >
+            <Text style={styles.selectBarAllText}>Select All</Text>
+          </Pressable>
+        </View>
+      )}
+      {selectMode && selectedIds.size > 0 && (
+        <View style={[styles.deleteBar, { bottom: insets.bottom + 62 }]}>
+          <Pressable
+            style={({ pressed }) => [styles.deleteBtn, pressed && { opacity: 0.8 }]}
+            onPress={handleDeleteSelected}
+          >
+            <Feather name="trash-2" size={16} color={COLORS.background} />
+            <Text style={styles.deleteBtnText}>Delete {selectedIds.size} Selected</Text>
+          </Pressable>
+        </View>
+      )}
 
       <AddModal visible={showModal} type={activeTab} onClose={() => setShowModal(false)} onSave={handleSave} t={t} />
       <ReceiptReviewModal visible={showReview} imageUri={reviewUri} imageBase64={reviewBase64} onClose={() => { setShowReview(false); setReviewUri(null); setReviewBase64(undefined); }} onSave={handleSave} t={t} />
@@ -1618,4 +2222,26 @@ const makeStyles = () => StyleSheet.create({
   emptyText: { fontSize: 15, color: COLORS.muted },
   emptyBtn: { backgroundColor: COLORS.primaryDim, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, borderWidth: 1, borderColor: COLORS.primary + '40' },
   emptyBtnText: { fontSize: 13, fontWeight: '600', color: COLORS.primary },
+
+  selectBar: {
+    position: 'absolute' as const, left: 0, right: 0, top: 0, zIndex: 100,
+    flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'space-between' as const,
+    paddingHorizontal: 20, paddingBottom: 12,
+    backgroundColor: COLORS.surface, borderBottomWidth: 1, borderBottomColor: COLORS.border,
+  },
+  selectBarLeft: { flexDirection: 'row' as const, alignItems: 'center' as const, gap: 6 },
+  selectBarCancelText: { fontSize: 14, color: COLORS.text },
+  selectBarCount: { fontSize: 14, fontWeight: '700' as const, color: COLORS.primary },
+  selectBarAllBtn: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8,
+    backgroundColor: COLORS.primaryDim, borderWidth: 1, borderColor: COLORS.primary + '40',
+  },
+  selectBarAllText: { fontSize: 12, fontWeight: '600' as const, color: COLORS.primary },
+
+  deleteBar: { position: 'absolute' as const, left: 20, right: 20, zIndex: 100 },
+  deleteBtn: {
+    flexDirection: 'row' as const, alignItems: 'center' as const, justifyContent: 'center' as const, gap: 8,
+    backgroundColor: COLORS.danger, borderRadius: 14, paddingVertical: 15,
+  },
+  deleteBtnText: { fontSize: 15, fontWeight: '700' as const, color: COLORS.background },
 });

@@ -10,7 +10,9 @@ import * as Haptics from 'expo-haptics';
 import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { getTransactions, getSettings } from '@/lib/storage';
+import { getTransactions, getSettings, getUserScopedKey } from '@/lib/storage';
+import { supabase } from '@/lib/supabase';
+import { getCurrentUserId } from '@/lib/session';
 import { formatCurrency } from '@/lib/currency';
 import type { Currency } from '@/lib/types';
 import DatePickerModal from '@/components/DatePickerModal';
@@ -26,19 +28,30 @@ const BRACKETS = [
 ];
 
 const TAX_CATS = new Set(['tax','tax_payment','advance_tax','prepayment','income_tax']);
-const PAYMENTS_KEY = 'tax_payments';
-const TAX_PERIOD_KEY = 'tax_period_dates';
 
 interface TaxPayment { id: string; date: string; amount: number; note: string; periodKey: string; }
 
 function generateId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
 
 async function loadPayments(): Promise<TaxPayment[]> {
-  try { return JSON.parse((await AsyncStorage.getItem(PAYMENTS_KEY)) || '[]'); }
-  catch { return []; }
+  const userId = getCurrentUserId();
+  if (!userId) return [];
+  const { data, error } = await supabase
+    .from('tax_payments')
+    .select('data')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
+  if (error) { console.error('[tax_payments] fetch failed:', error); return []; }
+  return (data ?? []).map(row => row.data as TaxPayment);
 }
 async function storePayments(p: TaxPayment[]) {
-  await AsyncStorage.setItem(PAYMENTS_KEY, JSON.stringify(p));
+  const userId = getCurrentUserId();
+  if (!userId) return;
+  await supabase.from('tax_payments').delete().eq('user_id', userId);
+  if (p.length === 0) return;
+  const rows = p.map(payment => ({ id: payment.id, user_id: userId, data: payment }));
+  const { error } = await supabase.from('tax_payments').insert(rows);
+  if (error) console.error('[tax_payments] insert failed:', error);
 }
 
 export default function TaxPrepaymentScreen() {
@@ -72,7 +85,7 @@ export default function TaxPrepaymentScreen() {
   const load = useCallback(async () => {
     const [tx, s, payments, savedDates] = await Promise.all([
       getTransactions(), getSettings(), loadPayments(),
-      AsyncStorage.getItem(TAX_PERIOD_KEY),
+      getUserScopedKey('tax_period_dates').then(k => AsyncStorage.getItem(k)),
     ]);
     setTransactions(tx);
     setCurrency(s.currency);
@@ -90,7 +103,7 @@ export default function TaxPrepaymentScreen() {
     try {
       setStartDate(pendingStart);
       setEndDate(pendingEnd);
-      await AsyncStorage.setItem(TAX_PERIOD_KEY, JSON.stringify({ start: pendingStart, end: pendingEnd }));
+      await AsyncStorage.setItem(await getUserScopedKey('tax_period_dates'), JSON.stringify({ start: pendingStart, end: pendingEnd }));
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch {
@@ -105,7 +118,7 @@ export default function TaxPrepaymentScreen() {
   const periodPayments = allPayments.filter(p => p.periodKey === periodKey);
   const manualPaid = periodPayments.reduce((s, p) => s + p.amount, 0);
 
-  const { estimatedTax, bracketAmounts, txPaid, taxableProfit } = useMemo(() => {
+  const { estimatedTax, bracketAmounts, txPaid, taxableProfit, expensesByVero, totalDeductions } = useMemo(() => {
     const s = new Date(startDate);
     const e = new Date(endDate);
     const period = transactions.filter(tx => {
@@ -113,8 +126,9 @@ export default function TaxPrepaymentScreen() {
       return d >= s && d <= e;
     });
 
-    const totalIncome  = period.filter(t => t.type === 'income').reduce((sum: number, t: any) => sum + t.amount, 0);
-    const totalExpense = period.filter(t => t.type === 'expense' && !TAX_CATS.has(t.category)).reduce((sum: number, t: any) => sum + t.amount, 0);
+    const totalIncome = period.filter(t => t.type === 'income').reduce((sum: number, t: any) => sum + t.amount, 0);
+    const deductible  = period.filter(t => t.type === 'expense' && !TAX_CATS.has(t.category));
+    const totalExpense = deductible.reduce((sum: number, t: any) => sum + t.amount, 0);
     const taxableProfit = Math.max(0, totalIncome - totalExpense);
 
     const bracketAmounts = BRACKETS.map(b => {
@@ -124,7 +138,13 @@ export default function TaxPrepaymentScreen() {
     const estimatedTax = bracketAmounts.reduce((s, t) => s + t, 0);
     const txPaid = period.filter(t => t.type === 'expense' && TAX_CATS.has(t.category)).reduce((sum: number, t: any) => sum + t.amount, 0);
 
-    return { estimatedTax, bracketAmounts, txPaid, taxableProfit };
+    const expensesByVero: Record<string, number> = {};
+    deductible.forEach((t: any) => {
+      const key = t.veroCategory ?? 'Unclassified';
+      expensesByVero[key] = (expensesByVero[key] ?? 0) + t.amount;
+    });
+
+    return { estimatedTax, bracketAmounts, txPaid, taxableProfit, expensesByVero, totalDeductions: totalExpense };
   }, [transactions, startDate, endDate]);
 
   const actualPaid = txPaid + manualPaid;
@@ -158,6 +178,12 @@ export default function TaxPrepaymentScreen() {
       <td class="label">${b.pct}</td>
       <td class="value">${fmtPdf(bracketAmounts[i])}</td>
     </tr>`).join('');
+    const deductionRows = Object.entries(expensesByVero)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, amount]) => `<tr>
+        <td class="label">${cat}</td>
+        <td class="value">${fmtPdf(amount)}</td>
+      </tr>`).join('');
     const payRows = periodPayments.map(p => `<tr>
       <td class="label">${p.date}</td>
       <td class="label">${p.note || '—'}</td>
@@ -184,6 +210,11 @@ export default function TaxPrepaymentScreen() {
         ${bracketRows}
         <tr><td class="total" colspan="2">${t('totalEstimatedTax')}</td><td class="value total">${fmtPdf(estimatedTax)}</td></tr>
       </table>
+      <h2>Expense Deductions by Category</h2>
+      <table>
+        ${deductionRows || `<tr><td colspan="2" class="label">No deductible expenses</td></tr>`}
+        <tr><td class="total">Total Deductions</td><td class="value total">${fmtPdf(totalDeductions)}</td></tr>
+      </table>
       <h2>${t('paymentHistory')}</h2>
       <table>
         ${payRows || `<tr><td colspan="3" class="label">${t('noPayments')}</td></tr>`}
@@ -196,7 +227,7 @@ export default function TaxPrepaymentScreen() {
       const { uri } = await Print.printToFileAsync({ html });
       await Sharing.shareAsync(uri, { mimeType: 'application/pdf', UTI: '.pdf' });
     } catch {}
-  }, [bracketAmounts, periodPayments, estimatedTax, actualPaid, remaining, taxableProfit, currency, startDate, endDate, t]);
+  }, [bracketAmounts, periodPayments, estimatedTax, actualPaid, remaining, taxableProfit, expensesByVero, totalDeductions, currency, startDate, endDate, t]);
 
   return (
     <ScrollView
