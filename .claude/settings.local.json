@@ -25,7 +25,12 @@
       "Bash(chmod +x \"C:/Users/Omistaja/Desktop/scandinordic-mobile-clean/.claude/hooks/SessionStart.sh\" \"C:/Users/Omistaja/Desktop/scandinordic-mobile-clean/.claude/hooks/PostToolUse.sh\" \"C:/Users/Omistaja/Desktop/scandinordic-mobile-clean/.claude/hooks/PreCompact.sh\")",
       "Bash(node *)",
       "Bash(npx supabase *)",
-      "Bash(npx eas *)"
+      "Bash(npx eas *)",
+      "Bash(npm audit *)",
+      "Bash(eas whoami *)",
+      "Bash(eas init *)",
+      "Bash(eas login *)",
+      "Bash(eas build *)"
     ]
   }
 }

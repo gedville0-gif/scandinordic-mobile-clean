@@ -37,7 +37,12 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      ["expo-router", { "origin": "https://scandinordic.vercel.app" }],
+      [
+        "expo-router",
+        {
+          "origin": "https://scandinordic.vercel.app"
+        }
+      ],
       "expo-font",
       "expo-web-browser",
       "expo-location"
@@ -46,8 +51,13 @@
       "typedRoutes": true
     },
     "extra": {
-      "router": { "origin": "https://scandinordic.vercel.app" },
-      "eas": { "projectId": "afa7f878-007f-454d-9edc-81ab6f33bc00" }
-    }
+      "router": {
+        "origin": "https://scandinordic.vercel.app"
+      },
+      "eas": {
+        "projectId": "b2693901-fb32-4997-9fa7-c80468588bf6"
+      }
+    },
+    "owner": "scandi"
   }
 }

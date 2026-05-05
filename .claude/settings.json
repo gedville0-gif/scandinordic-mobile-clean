@@ -1,9 +1,9 @@
 {
   "model": "claude-sonnet-4-20250514",
   "hooks": {
-    "SessionStart": [".claude/hooks/SessionStart.sh"],
-    "PostToolUse": [".claude/hooks/PostToolUse.sh"],
-    "PreCompact": [".claude/hooks/PreCompact.sh"]
+    "SessionStart": [{"matcher": "", "hooks": [{"type": "command", "command": ".claude/hooks/SessionStart.sh"}]}],
+    "PostToolUse": [{"matcher": "", "hooks": [{"type": "command", "command": ".claude/hooks/PostToolUse.sh"}]}],
+    "PreCompact": [{"matcher": "", "hooks": [{"type": "command", "command": ".claude/hooks/PreCompact.sh"}]}]
   },
   "permissions": {
     "allow": [
