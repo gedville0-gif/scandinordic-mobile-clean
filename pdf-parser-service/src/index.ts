@@ -124,7 +124,7 @@ app.use((error: Error, req: express.Request, res: express.Response, next: expres
 });
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log('🚀 PDF Parser Service started');
   console.log(`📡 Server running on port ${PORT}`);
   console.log(`🔐 Auth secret: ${PARSER_SECRET === 'default-secret' ? '⚠️  Using default secret!' : '✅ Custom secret configured'}`);
