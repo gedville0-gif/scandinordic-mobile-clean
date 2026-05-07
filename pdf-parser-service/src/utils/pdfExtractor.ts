@@ -1,4 +1,5 @@
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+// Dynamic import for ESM compatibility
+type PDFJSLib = any;
 
 export interface TextItem {
   str: string;
@@ -26,6 +27,9 @@ export class PDFExtractor {
     try {
       console.log('📄 Starting PDF text extraction...');
 
+      // Dynamic import for ESM compatibility
+      const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+
       // Convert base64 to ArrayBuffer
       const binaryString = atob(pdfBase64);
       const bytes = new Uint8Array(binaryString.length);
@@ -34,7 +38,7 @@ export class PDFExtractor {
       }
 
       // Load PDF document
-      const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
+      const pdf = await pdfjs.getDocument({ data: bytes }).promise;
       console.log(`📄 PDF loaded: ${pdf.numPages} pages`);
 
       const allItems: TextItem[] = [];

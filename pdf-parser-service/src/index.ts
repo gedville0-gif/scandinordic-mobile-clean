@@ -1,9 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
-import { PDFExtractor } from './utils/pdfExtractor';
-import { OPParser } from './parsers/OPParser';
-import { NordeaParser } from './parsers/NordeaParser';
+import { PDFExtractor } from './utils/pdfExtractor.js';
+import { OPParser } from './parsers/OPParser.js';
+import { NordeaParser } from './parsers/NordeaParser.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;

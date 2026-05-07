@@ -1,4 +1,4 @@
-import { TextItem } from '../utils/pdfExtractor';
+import { TextItem } from '../utils/pdfExtractor.js';
 
 export interface Transaction {
   date: string;
