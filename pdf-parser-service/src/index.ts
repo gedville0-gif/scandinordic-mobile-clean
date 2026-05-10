@@ -60,13 +60,38 @@ app.post('/parse', requireAuth, async (req, res) => {
       });
     }
 
-    const bank = bankId.toLowerCase();
-    console.log(`🏦 Processing ${bank.toUpperCase()} bank statement`);
+    const requestedBank = bankId.toLowerCase();
+    console.log(`🏦 Requested bank: ${requestedBank.toUpperCase()}`);
 
     // Extract text from PDF
     console.log('📄 Extracting text from PDF...');
     const extractedData = await PDFExtractor.extractText(pdf);
     console.log(`📄 Extracted ${extractedData.items.length} text items from ${extractedData.pageCount} pages`);
+
+    // Auto-detect bank from PDF text content
+    const fullText = extractedData.items.map(item => item.str).join(' ');
+
+    const isNordea = /Nordea|NDEAFIHH|nordea\.fi/i.test(fullText);
+    const isOP = /Osuuspankki|OP Ryhmä|OKOYFIHH|op\.fi/i.test(fullText);
+
+    let detectedBank = requestedBank;
+    if (isNordea && !isOP) {
+      detectedBank = 'nordea';
+      console.log('🔍 Auto-detected: Nordea (found Nordea keywords)');
+    } else if (isOP && !isNordea) {
+      detectedBank = 'op';
+      console.log('🔍 Auto-detected: OP Bank (found OP keywords)');
+    } else {
+      console.log(`🔍 Could not auto-detect, using requested: ${requestedBank}`);
+    }
+
+    // Warn if requested bank differs from detected bank
+    if (detectedBank !== requestedBank) {
+      console.log(`⚠️ Bank mismatch! Requested: ${requestedBank}, Detected: ${detectedBank}. Using detected.`);
+    }
+
+    const bank = detectedBank;
+    console.log(`🏦 Processing as ${bank.toUpperCase()} bank statement`);
 
     // Parse based on bank type
     let transactions;
@@ -86,6 +111,9 @@ app.post('/parse', requireAuth, async (req, res) => {
       transactions,
       count: transactions.length,
       bankId: bank,
+      requestedBank,
+      detectedBank,
+      bankMismatch: detectedBank !== requestedBank,
       metadata: {
         pageCount: extractedData.pageCount,
         textItems: extractedData.items.length,
