@@ -32,7 +32,6 @@ try { ImagePicker = require('expo-image-picker'); } catch {}
 try { DocumentPicker = require('expo-document-picker'); } catch {}
 try { Papa = require('papaparse'); } catch {}
 
-import { recognizeTextFromMultipleImages, type MLKitResult } from '@/src/services/mlKitTextRecognition';
 import { convertPdfToOptimizedImages, cleanupTempImages } from '@/src/services/pdfToImages';
 import { parseFinnishBankStatement, type ParsedTransaction } from '@/src/services/finnishBankParser';
 
@@ -82,17 +81,130 @@ function parseCsvDate(s: string): string {
   return new Date().toISOString().split('T')[0];
 }
 
+// Extract merchant/store name from receipt OCR text
+function extractMerchant(text: string): string {
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+
+  // First non-empty line is usually the merchant name
+  if (lines.length > 0) {
+    return lines[0].substring(0, 50); // Limit length
+  }
+
+  return '';
+}
+
+// Extract total amount from receipt OCR text
+function extractAmount(text: string): number | null {
+  // Look for total amount patterns with Finnish formatting
+  const patterns = [
+    /total[:\s]*€?\s*([\d,]+\.?\d*)\s*€?/i,
+    /sum[:\s]*€?\s*([\d,]+\.?\d*)\s*€?/i,
+    /yhteensä[:\s]*€?\s*([\d,]+\.?\d*)\s*€?/i,
+    /summa[:\s]*€?\s*([\d,]+\.?\d*)\s*€?/i,
+    /([\d,]+\.?\d*)\s*€/g,  // Amount followed by €
+    /€\s*([\d,]+\.?\d*)/g,  // € followed by amount
+    /([\d]+[,\.]\d{2})/g    // Finnish decimal format: 12,50 or 12.50
+  ];
+
+  const amounts: number[] = [];
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      const amountStr = match[1];
+      if (amountStr) {
+        // Handle Finnish comma decimal format: 12,50 → 12.50
+        const normalized = amountStr.replace(',', '.');
+        const amount = parseFloat(normalized);
+        if (amount > 0 && amount < 10000) { // Reasonable range for receipts
+          amounts.push(amount);
+        }
+      }
+    }
+  }
+
+  // Return the largest reasonable amount (likely the total)
+  if (amounts.length > 0) {
+    return Math.max(...amounts);
+  }
+
+  return null;
+}
+
+// Extract date from receipt OCR text
+function extractDate(text: string): string | null {
+  // Look for date patterns
+  const datePatterns = [
+    /(\d{1,2})[\.\/](\d{1,2})[\.\/](\d{2,4})/,
+    /(\d{2,4})-(\d{1,2})-(\d{1,2})/
+  ];
+
+  for (const pattern of datePatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      const [, p1, p2, p3] = match;
+      // Try DD.MM.YYYY format
+      if (p3.length === 4) {
+        return `${p3}-${p2.padStart(2, '0')}-${p1.padStart(2, '0')}`;
+      }
+      // Try YYYY-MM-DD format
+      if (p1.length === 4) {
+        return `${p1}-${p2.padStart(2, '0')}-${p3.padStart(2, '0')}`;
+      }
+    }
+  }
+
+  return null;
+}
+
 // Extracts transaction rows from raw OCR text returned by the google-vision-ocr edge function.
 function parseBankStatementText(rawText: string): Transaction[] {
+  console.log('INPUT STARTS WITH:', rawText.substring(0, 20));
   console.log('RAW TEXT START:', rawText.substring(0, 50));
 
-  // Check if rawText is already JSON from Gemini (more robust)
+  // Convert Google Vision format to app's Transaction format
+  const convertGoogleVisionToTransaction = (item: any): Transaction => {
+    const amount = typeof item.amount === 'number' ? item.amount : parseFloat(item.amount || 0);
+    const type: TransactionType = amount >= 0 ? 'income' : 'expense';
+    const description = item.description || '';
+
+    // Auto-detect category based on description
+    const detectedCategory = detectCategory(description, type);
+    const category = detectedCategory || (type === 'income' ? 'consulting_services' : 'fuel');
+
+    return {
+      id: generateId(),
+      type,
+      amount: Math.abs(amount),
+      description,
+      category,
+      veroCategory: getVeroCategory(category, type),
+      date: new Date().toISOString().split('T')[0],
+      vatRate: type === 'expense' ? 25.5 : 0,
+      note: undefined,
+    };
+  };
+
+  console.log('CHECKING FOR JSON...');
+  // Check if rawText is already JSON from Google Vision API
   const trimmed = rawText.trim();
   if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return parsed;
-      if (parsed && typeof parsed === 'object') return [parsed];
+      console.log('✅ Detected JSON response from Google Vision API');
+
+      if (Array.isArray(parsed)) {
+        const transactions = parsed.map(convertGoogleVisionToTransaction);
+        console.log(`✅ Converted ${transactions.length} Google Vision transactions:`);
+        transactions.forEach(t => console.log(`  - ${t.description}: ${t.amount}€ (${t.type})`));
+        return transactions;
+      }
+
+      if (parsed && typeof parsed === 'object') {
+        const transaction = convertGoogleVisionToTransaction(parsed);
+        console.log(`✅ Converted single Google Vision transaction: ${transaction.description}: ${transaction.amount}€ (${transaction.type})`);
+        return [transaction];
+      }
     } catch (e) {
       console.log('JSON parse failed, attempting recovery:', e);
 
@@ -113,7 +225,12 @@ function parseBankStatementText(rawText: string): Transaction[] {
           const recoveredParsed = JSON.parse(fixedJson);
           if (Array.isArray(recoveredParsed)) {
             console.log('✅ Successfully recovered', recoveredParsed.length, 'transactions from truncated JSON');
-            return recoveredParsed;
+
+            // Convert recovered Google Vision format to app's Transaction format
+            const transactions = recoveredParsed.map(convertGoogleVisionToTransaction);
+            console.log(`✅ Converted ${transactions.length} recovered Google Vision transactions:`);
+            transactions.forEach(t => console.log(`  - ${t.description}: ${t.amount}€ (${t.type})`));
+            return transactions;
           }
         } catch (recoveryError) {
           console.log('JSON recovery failed:', recoveryError);
@@ -801,9 +918,40 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
     setScanError(null);
     setConfidence(null);
 
-    // Image OCR temporarily disabled - use PDF import instead
-    // TODO: Implement image OCR with ML Kit
-    Promise.resolve({ error: 'Image OCR not available - use PDF import instead' })
+    // Send image to Google Vision OCR for receipt processing
+    (async () => {
+      const imageBase64 = await FileSystem.readAsStringAsync(imageUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      const { data: visionResult, error: visionError } = await supabase.functions.invoke('google-vision-ocr', {
+        body: {
+          image: imageBase64,
+          type: 'receipt'
+        }
+      });
+
+      if (visionError) {
+        throw new Error(`Google Vision error: ${visionError.message}`);
+      }
+
+      if (!visionResult || !visionResult.success) {
+        throw new Error(visionResult?.error || 'OCR failed');
+      }
+
+      // Extract receipt data from vision result
+      const fullText = visionResult.rawText || '';
+      const merchant = extractMerchant(fullText);
+      const amount = extractAmount(fullText);
+      const date = extractDate(fullText);
+
+      return {
+        merchant,
+        amount,
+        date,
+        confidence: 0.8 // Default confidence for receipt OCR
+      };
+    })()
       .then((result: any) => {
         if (cancelled) return;
 
@@ -1171,7 +1319,7 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
     let tempImageUris: string[] = [];
 
     try {
-      console.log('📄 Starting ML Kit PDF import process');
+      console.log('📄 Starting PDF import process');
 
       // Step 1: Pick PDF file
       const res = await DocumentPicker.getDocumentAsync({
@@ -1186,88 +1334,190 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
 
       console.log('✅ PDF selected:', res.assets[0].name);
 
-      // Step 2: Convert PDF to images
-      console.log('🔄 Converting PDF to images...');
-      const pdfResult = await convertPdfToOptimizedImages(res.assets[0].uri);
+      // Step 2: Send PDF to parser service
+      console.log('🔄 Converting PDF to base64...');
 
-      if (pdfResult.error) {
-        throw new Error(pdfResult.error);
+      const pdfBase64 = await FileSystem.readAsStringAsync(res.assets[0].uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+
+      console.log('📄 PDF base64 size:', pdfBase64.length, 'characters');
+
+      // Detect bank type from filename (server will auto-detect from content if wrong)
+      const filename = res.assets[0].name?.toLowerCase() || '';
+      let bankId = 'nordea'; // default to nordea (most common)
+      if (filename.includes('nordea')) {
+        bankId = 'nordea';
+      } else if (filename.includes('op') || filename.includes('osuuspankki') || filename.match(/statement\d{6}/)) {
+        // OP statements often named like "statement202603.PDF"
+        bankId = 'op';
       }
 
-      if (pdfResult.imageUris.length === 0) {
-        throw new Error('No pages found in PDF');
+      console.log(`🏦 Filename-based guess: ${bankId} (server will auto-detect from PDF content)`);
+      console.log('🔄 Sending to PDF parser service...');
+
+      // Call PDF parser service
+      const parseResponse = await fetch('https://scandinordic-mobile-clean-production.up.railway.app/parse', { // Change after Railway deployment
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Parser-Secret': 'scandinordic2026' // TODO: Move to env config
+        },
+        body: JSON.stringify({
+          pdf: pdfBase64,
+          bankId: bankId
+        })
+      });
+
+      if (!parseResponse.ok) {
+        throw new Error(`Parser service error: ${parseResponse.status}`);
       }
 
-      tempImageUris = pdfResult.imageUris;
-      console.log('✅ PDF converted to', pdfResult.imageUris.length, 'images');
+      const parseResult = await parseResponse.json();
 
-      // Step 3: Run ML Kit text recognition on all images
-      console.log('🔄 Running ML Kit text recognition...');
-      const mlKitResult = await recognizeTextFromMultipleImages(pdfResult.imageUris);
-
-      if (mlKitResult.error) {
-        throw new Error(mlKitResult.error);
+      if (!parseResult.success) {
+        throw new Error(`Parser error: ${parseResult.error}`);
       }
 
-      const rawText = mlKitResult.rawText;
-      console.log('✅ ML Kit extraction complete - Length:', rawText.length);
-      console.log('📝 First 300 chars:', rawText.substring(0, 300));
+      console.log('📝 Parser service result:', parseResult);
 
-      // Debug alert showing extraction info
-      alert(`ML Kit PDF Processing Complete!\n\nText extracted: ${mlKitResult.debug_text_length} chars\nMethod: On-device ML Kit\nPages processed: ${pdfResult.pageCount}\n\nFirst 300 chars:\n${rawText.substring(0, 300)}`);
+      // Convert parser result to app format with auto-categorization
+      const transactions: Transaction[] = parseResult.transactions.map((tx: any) => {
+        const txType = tx.type as TransactionType;
+        // Auto-detect category from description, fallback to default
+        const detectedCategory = detectCategory(tx.description, txType);
+        const category = detectedCategory || (txType === 'income' ? 'other_income' : 'unclassified');
 
-      // Step 4: Parse transactions using Finnish bank parser
-      console.log('🔄 Parsing Finnish bank statement...');
-      const parseResult = parseFinnishBankStatement(rawText);
+        return {
+          id: generateId(),
+          type: txType,
+          amount: Math.abs(tx.amount),
+          description: tx.description,
+          category,
+          veroCategory: getVeroCategory(category, txType),
+          date: tx.date,
+          vatRate: txType === 'income' ? 0 : 25.5,
+          note: undefined,
+        };
+      });
 
-      if (parseResult.totalFound === 0) {
-        let message = `Could not detect any transactions in this PDF.\n\nBank detected: ${parseResult.bankType}\nText extracted: ${mlKitResult.debug_text_length} chars`;
+      console.log(`✅ Converted ${transactions.length} transactions`);
 
-        if (mlKitResult.debug_text_length === 0) {
-          message += '\n\nThe PDF may be password-protected or contain only images without text.';
-        } else if (mlKitResult.debug_text_length < 100) {
-          message += '\n\nVery little text was found. The PDF may be low quality or contain mostly images.';
-        } else {
-          message += '\n\nText was found but no recognizable transaction patterns were detected.';
-        }
+      // Show confirmation dialog
+      const incomeCount = transactions.filter(t => t.type === 'income').length;
+      const expenseCount = transactions.filter(t => t.type === 'expense').length;
 
-        await showDialog('No transactions found', message);
-        return;
-      }
+      // Use detected bank from server (may differ from filename guess)
+      const actualBank = parseResult.detectedBank || parseResult.bankId || bankId;
+      const bankLabel = parseResult.bankMismatch
+        ? `${actualBank.toUpperCase()} Bank (auto-corrected from ${bankId.toUpperCase()})`
+        : `${actualBank.toUpperCase()} Bank`;
 
-      // Step 5: Convert to app transaction format
-      const txs: Transaction[] = parseResult.transactions.map(parsed => ({
-        id: generateId(),
-        type: parsed.type,
-        amount: parsed.amount,
-        description: parsed.description,
-        category: parsed.category,
-        veroCategory: parsed.veroCategory || 'Other deductible expenses',
-        date: parsed.date,
-        vatRate: 0,
-      }));
-
-      console.log('✅ Transactions parsed:', txs.length);
-      console.log('📊 Income:', parseResult.incomeCount, 'Expense:', parseResult.expenseCount);
-
-      // Step 6: Show confirmation dialog
       const idx = await showDialog(
-        `Import ${parseResult.totalFound} transaction${parseResult.totalFound === 1 ? '' : 's'}?`,
-        `Bank: ${parseResult.bankType}\n${parseResult.incomeCount} income · ${parseResult.expenseCount} expense · 0% VAT`,
-        [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${parseResult.totalFound}` }]
+        `Import ${transactions.length} transaction${transactions.length === 1 ? '' : 's'}?`,
+        `${incomeCount} income · ${expenseCount} expense · ${bankLabel}`,
+        [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${transactions.length}` }]
       );
 
       if (idx === 1) {
         console.log('✅ User confirmed import');
-        onBulkSave(txs);
+        onBulkSave(transactions);
         onClose();
+      }
+      return;
+
+      if (visionError) {
+        throw new Error(`Google Vision error: ${visionError.message}`);
+      }
+
+      if (!visionResult) {
+        throw new Error('Google Vision returned empty result');
+      }
+
+      console.log('📝 Google Vision result:', visionResult);
+
+      // Handle Google Vision response
+      if (visionResult.success && visionResult.transactions && visionResult.transactions.length > 0) {
+        // Use pre-parsed transactions from Google Vision
+        const transactions: Transaction[] = visionResult.transactions.map((tx: any) => ({
+          id: generateId(),
+          type: tx.amount >= 0 ? 'income' : 'expense',
+          amount: Math.abs(tx.amount),
+          description: tx.description,
+          category: tx.amount >= 0 ? 'consulting_services' : 'fuel',
+          veroCategory: getVeroCategory(tx.amount >= 0 ? 'consulting_services' : 'fuel', tx.amount >= 0 ? 'income' : 'expense'),
+          date: tx.date,
+          vatRate: tx.amount >= 0 ? 0 : 25.5,
+          note: undefined,
+        }));
+
+        console.log(`✅ Google Vision parsed: ${transactions.length} transactions`);
+
+        // Debug alert showing extraction info
+        alert(`PDF Processing Complete!\n\nTransactions found: ${transactions.length}\nMethod: Google Vision OCR\nFile: ${res.assets[0].name}`);
+
+        // Calculate income/expense counts
+        const incomeCount = transactions.filter(t => t.type === 'income').length;
+        const expenseCount = transactions.filter(t => t.type === 'expense').length;
+
+        console.log('📊 Income:', incomeCount, 'Expense:', expenseCount);
+
+        // Show confirmation dialog
+        const idx = await showDialog(
+          `Import ${transactions.length} transaction${transactions.length === 1 ? '' : 's'}?`,
+          `${incomeCount} income · ${expenseCount} expense · Google Vision`,
+          [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${transactions.length}` }]
+        );
+
+        if (idx === 1) {
+          console.log('✅ User confirmed import');
+          onBulkSave(transactions);
+          onClose();
+        }
+        return;
+
+      } else if (visionResult.rawText) {
+        // Fallback: use text parsing if no pre-parsed transactions
+        console.log('📝 Using text parsing fallback - text length:', visionResult.rawText.length);
+
+        const transactions = parseBankStatementText(visionResult.rawText);
+
+        if (transactions.length === 0) {
+          await showDialog('No transactions found', `Could not detect transactions in this PDF.\n\nText extracted: ${visionResult.rawText.length} chars\n\nThe PDF may be a summary page or contain non-transaction data.`);
+          return;
+        }
+
+        // Process text parsing results
+        const incomeCount = transactions.filter(t => t.type === 'income').length;
+        const expenseCount = transactions.filter(t => t.type === 'expense').length;
+
+        const idx = await showDialog(
+          `Import ${transactions.length} transaction${transactions.length === 1 ? '' : 's'}?`,
+          `${incomeCount} income · ${expenseCount} expense · Text Parsing`,
+          [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${transactions.length}` }]
+        );
+
+        if (idx === 1) {
+          onBulkSave(transactions);
+          onClose();
+        }
+        return;
+
+      } else {
+        throw new Error(visionResult.error || 'Google Vision OCR failed - no text or transactions found');
       }
 
     } catch (e: any) {
       console.log('❌ PDF import error:', e?.message);
-      setError('PDF import failed: ' + (e?.message ?? 'Unknown error'));
+
+      // Check if it's a known PDF conversion issue
+      if (e?.message?.includes('PDF format not supported') || e?.message?.includes('requires image conversion')) {
+        setError('PDF import is currently being improved. Try these alternatives:\n\n📸 Tap "Scan Receipt" to take a photo\n🖼️ Tap "Upload Image" to select a photo\n\nWe\'re working on full PDF support!');
+      } else {
+        setError('PDF import failed: ' + (e?.message ?? 'Unknown error'));
+      }
     } finally {
-      // Clean up temporary image files
+      // Clean up any temporary image files (usually none with direct PDF processing)
       if (tempImageUris.length > 0) {
         try {
           await cleanupTempImages(tempImageUris);
