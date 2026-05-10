@@ -87,13 +87,15 @@ export class NordeaParser {
 
     // Match: DD.MM [DD.MM] VENDOR [SIGN]AMOUNT[SIGN]
     // Handles formats:
-    //   "9,96-"       (trailing minus)
+    //   "9,96-"       (trailing minus, no space)
+    //   "9,96 -"      (trailing minus with space - separate text item)
     //   "1.087,98+"   (trailing plus with thousands separator)
     //   "-3,65"       (leading minus)
-    //   "590,80"      (positive, no sign)
+    //   "590,80"      (positive, no sign = income)
     //   "1 269,10"    (with space thousands separator)
+    // CRITICAL: Trailing "-" means EXPENSE (negative). No sign = INCOME (positive).
     const txMatch = firstLine.match(
-      /^(\d{1,2}\.\d{1,2})\s+(?:(\d{1,2}\.\d{1,2})\s+)?(.+?)\s+([-+]?\d+(?:[.\s]\d{3})*,\d{2})([-+]?)$/
+      /^(\d{1,2}\.\d{1,2})\s+(?:(\d{1,2}\.\d{1,2})\s+)?(.+?)\s+([-+]?\d+(?:[.\s]\d{3})*,\d{2})\s*([-+]?)$/
     );
 
     if (!txMatch) {
@@ -119,9 +121,15 @@ export class NordeaParser {
 
     if (isNaN(amount) || amount === 0) return null;
 
-    // Apply sign: leading - or trailing - means expense (negative)
-    if (hasLeadingMinus || signSuffix === '-') {
-      amount = -amount;
+    // SIGN DETECTION (Nordea convention):
+    // - Trailing "-" (e.g. "9,96-") = EXPENSE (negative)
+    // - Trailing "+" (e.g. "590,80+") = INCOME (positive, explicit)
+    // - No trailing sign (e.g. "590,80") = INCOME (positive, default)
+    // - Leading "-" (rare) = EXPENSE (negative)
+    if (signSuffix === '-' || hasLeadingMinus) {
+      amount = -Math.abs(amount); // Force negative for expenses
+    } else {
+      amount = Math.abs(amount); // Force positive for income (signSuffix is '+' or empty)
     }
 
     // Convert date to YYYY-MM-DD
