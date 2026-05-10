@@ -13,7 +13,7 @@ export class NordeaParser {
    * Parse Nordea Bank PDF text items into transactions
    */
   static parse(items: TextItem[]): Transaction[] {
-    console.log('🏦 Starting Nordea parsing...');
+    console.log(`🏦 Starting Nordea parsing (${items.length} text items)`);
 
     const transactions: Transaction[] = [];
     const lines = this.groupItemsByLines(items);
@@ -35,12 +35,11 @@ export class NordeaParser {
       const line = lines[i];
       const lineText = this.lineToText(line);
 
-      // Check for Nordea date pattern: "DD.MM" at start of line
-      const dateMatch = lineText.match(/^(\d{1,2}\.\d{1,2})\s/);
+      // Updated regex: DD.MM at start, followed by space OR end of string
+      // Avoid matching DD.MM.YYYY (which is the period header date format)
+      const dateMatch = lineText.match(/^(\d{1,2}\.\d{1,2})(?!\.\d)(\s|$)/);
 
       if (dateMatch) {
-        console.log(`📅 Found date line: ${lineText}`);
-
         // Collect transaction block (all lines until next date or end)
         const transactionLines: string[] = [];
         let j = i;
@@ -49,7 +48,7 @@ export class NordeaParser {
           const currentLineText = this.lineToText(lines[j]);
 
           // Stop if we hit another date (but not the first one)
-          if (j > i && currentLineText.match(/^\d{1,2}\.\d{1,2}\s/)) {
+          if (j > i && /^\d{1,2}\.\d{1,2}(?!\.\d)(\s|$)/.test(currentLineText)) {
             break;
           }
 
@@ -68,45 +67,70 @@ export class NordeaParser {
         i++;
       }
     }
-
     console.log(`✅ Nordea parsing complete: ${transactions.length} transactions`);
     return transactions;
   }
 
   /**
-   * Parse a transaction block (multiple lines for one transaction)
+   * Parse a transaction block - Nordea uses single-line format:
+   * "DD.MM DD.MM VENDOR AMOUNT[-]"
+   * Where:
+   *   - First date = entry date (booking)
+   *   - Second date = value date
+   *   - VENDOR = merchant/payee name
+   *   - AMOUNT = European format (e.g. 9,96) with optional trailing minus for expenses
    */
   private static parseTransactionBlock(lines: string[], datePrefix: string, year: string): Transaction | null {
-    if (lines.length < 2) return null;
+    if (lines.length === 0) return null;
 
-    // Line 1: Date + Description (remove date prefix to get description)
-    const description = lines[0].replace(/^\d{1,2}\.\d{1,2}\s+/, '').trim();
+    const firstLine = lines[0];
 
-    // Line 2: Payment method
-    const paymentMethod = lines.length > 1 ? lines[1].trim() : '';
+    // Match: DD.MM [DD.MM] VENDOR [SIGN]AMOUNT[SIGN]
+    // Handles formats:
+    //   "9,96-"       (trailing minus)
+    //   "1.087,98+"   (trailing plus with thousands separator)
+    //   "-3,65"       (leading minus)
+    //   "590,80"      (positive, no sign)
+    //   "1 269,10"    (with space thousands separator)
+    const txMatch = firstLine.match(
+      /^(\d{1,2}\.\d{1,2})\s+(?:(\d{1,2}\.\d{1,2})\s+)?(.+?)\s+([-+]?\d+(?:[.\s]\d{3})*,\d{2})([-+]?)$/
+    );
 
-    // Last line: Amount in European format (-3,39 or 590,80)
-    const lastLine = lines[lines.length - 1];
-    const amountMatch = lastLine.match(/([-+]?\d+,\d{2})(?:\s*€)?$/);
-
-    if (!amountMatch || !description || this.shouldSkipLine(description)) {
+    if (!txMatch) {
       return null;
     }
 
-    // Parse amount (convert comma to dot)
-    const amountStr = amountMatch[1].replace(',', '.');
-    const amount = parseFloat(amountStr);
+    const [, , , vendorPart, amountPart, signSuffix] = txMatch;
+    let vendor = vendorPart.trim();
 
-    if (amount === 0) return null;
+    // Skip balance/summary rows
+    if (this.shouldSkipLine(vendor)) {
+      return null;
+    }
 
-    // Convert date DD.MM.YYYY
-    const fullDate = `${datePrefix}.${year}`;
+    // Parse amount - remove thousands separators (dot or space), convert comma to dot
+    // Strip leading sign if any (we'll re-apply it)
+    const hasLeadingMinus = amountPart.startsWith('-');
+    const cleanAmount = amountPart
+      .replace(/^[-+]/, '')           // Remove leading sign
+      .replace(/[.\s](?=\d{3})/g, '') // Remove thousands separators
+      .replace(',', '.');             // European decimal to dot
+    let amount = parseFloat(cleanAmount);
+
+    if (isNaN(amount) || amount === 0) return null;
+
+    // Apply sign: leading - or trailing - means expense (negative)
+    if (hasLeadingMinus || signSuffix === '-') {
+      amount = -amount;
+    }
+
+    // Convert date to YYYY-MM-DD
     const [day, month] = datePrefix.split('.');
     const date = `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`;
 
     return {
       date,
-      description,
+      description: vendor,
       amount,
       type: amount >= 0 ? 'income' : 'expense'
     };

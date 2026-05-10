@@ -45,21 +45,24 @@ export class PDFExtractor {
       let pageWidth = 0;
       let pageHeight = 0;
 
+      // First pass: get page dimensions from page 1
+      const firstPage = await pdf.getPage(1);
+      const firstViewport = firstPage.getViewport({ scale: 1.0 });
+      pageWidth = firstViewport.width;
+      pageHeight = firstViewport.height;
+
       // Process each page
       for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
         console.log(`📄 Processing page ${pageNum}...`);
 
         const page = await pdf.getPage(pageNum);
-        const viewport = page.getViewport({ scale: 1.0 });
-
-        // Store page dimensions (use first page)
-        if (pageNum === 1) {
-          pageWidth = viewport.width;
-          pageHeight = viewport.height;
-        }
 
         // Get text content with coordinates
         const textContent = await page.getTextContent();
+
+        // Offset Y by page so items from different pages don't collide
+        // Pages stack vertically: page 1 has highest Y, page N has lowest
+        const yOffset = (pdf.numPages - pageNum) * pageHeight;
 
         // Process each text item
         for (const item of textContent.items) {
@@ -67,7 +70,7 @@ export class PDFExtractor {
             allItems.push({
               str: item.str,
               x: item.transform[4], // X coordinate
-              y: item.transform[5], // Y coordinate
+              y: item.transform[5] + yOffset, // Y coordinate offset by page
               width: item.width || 0,
               height: item.height || 0,
               fontName: item.fontName || '',
