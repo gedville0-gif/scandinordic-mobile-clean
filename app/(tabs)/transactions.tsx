@@ -883,7 +883,7 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
   const [desc, setDesc] = useState('');
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('other');
-  const [vatRate, setVatRate] = useState('25.5');
+  const [vatRows, setVatRows] = useState<{ id: string; rowAmt: string; vatPct: number }[]>([]);
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [note, setNote] = useState('');
@@ -898,12 +898,15 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
   const ocrLowConfidence = confidence !== null && !scanning && confidence <= 0.8;
   const amtNum = parseFloat(amount.replace(',', '.'));
   const saveDisabled = !amount.trim() || isNaN(amtNum) || amtNum <= 0;
+  const rowTotal = vatRows.reduce((s, r) => s + (parseFloat(r.rowAmt.replace(',', '.')) || 0), 0);
+  const rowMismatch = amtNum > 0 && Math.abs(rowTotal - amtNum) > 0.01;
 
   // Reset all fields when modal opens
   useEffect(() => {
     if (visible) {
       setDesc(''); setAmount(''); setCategory('other');
-      setVatRate('25.5'); setSelectedDate(new Date()); setShowDatePicker(false); setNote('');
+      setVatRows([{ id: generateId(), rowAmt: '', vatPct: 25.5 }]);
+      setSelectedDate(new Date()); setShowDatePicker(false); setNote('');
       setShowCatSheet(false); setCatSearch('');
       setShowCustomInput(false); setCustomInputText('');
       setScanning(false); setScanError(null); setConfidence(null);
@@ -965,11 +968,13 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
         console.log('📋 merchant:', merchant, 'amount:', amount, 'date:', date);
 
         setDesc(String(merchant));
-        setAmount(amount !== null && amount !== undefined ? String(amount) : '');
+        const detectedAmt = amount !== null && amount !== undefined ? String(amount) : '';
+        setAmount(detectedAmt);
         if (date) {
           try { setSelectedDate(new Date(date + 'T12:00:00')); } catch (e) {}
         }
-        if (result?.vat_rate !== null && result?.vat_rate !== undefined) setVatRate(String(result.vat_rate));
+        const detectedVat = (result?.vat_rate !== null && result?.vat_rate !== undefined) ? Number(result.vat_rate) : 25.5;
+        setVatRows([{ id: generateId(), rowAmt: detectedAmt, vatPct: detectedVat }]);
         if (result?.category && result.category !== 'other') setCategory(result.category);
         setConfidence(result?.confidence ?? null);
       })
@@ -988,7 +993,9 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
     if (!desc.trim() || !amount) { showDialog(t('missingFields'), t('fillTitleAmount')); return; }
     const amt = parseFloat(amount.replace(',', '.'));
     if (isNaN(amt) || amt <= 0) { showDialog(t('invalidAmount') || 'Invalid amount'); return; }
-    const vp = parseFloat(vatRate) || 0;
+    const rowNetTotal = vatRows.reduce((s, r) => s + (parseFloat(r.rowAmt.replace(',', '.')) || 0), 0);
+    const rowVatTotal = vatRows.reduce((s, r) => s + (parseFloat(r.rowAmt.replace(',', '.')) || 0) * r.vatPct / 100, 0);
+    const vp = rowNetTotal > 0 ? Math.round(rowVatTotal / rowNetTotal * 1000) / 10 : 0;
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const dateStr = selectedDate.toISOString().split('T')[0];
 
@@ -1115,13 +1122,56 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
             </View>
           </View>
 
-          <Text style={modalStyles.label}>{t('vatPresets')}</Text>
-          <View style={modalStyles.vatPresetsRow}>
-            {VAT_PRESETS.map(v => (
-              <Pressable key={v} style={[modalStyles.chip, vatRate === String(v) && { backgroundColor: COLORS.primaryDim, borderColor: COLORS.primary }]} onPress={() => { setVatRate(String(v)); Haptics.selectionAsync(); }}>
-                <Text style={[modalStyles.chipText, vatRate === String(v) && { color: COLORS.primary }]}>{v}%</Text>
-              </Pressable>
-            ))}
+          {/* VAT breakdown table */}
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+            <Text style={modalStyles.label}>{t('vatPresets')}</Text>
+            <Pressable
+              onPress={() => {
+                const remaining = amtNum > 0 ? Math.max(0, amtNum - rowTotal) : 0;
+                setVatRows(prev => [...prev, { id: generateId(), rowAmt: remaining > 0 ? remaining.toFixed(2) : '', vatPct: -1 }]);
+              }}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 20, backgroundColor: COLORS.primaryDim, borderWidth: 1, borderColor: COLORS.primary + '40' }}
+            >
+              <Feather name="plus" size={11} color={COLORS.primary} />
+              <Text style={{ fontSize: 11, fontWeight: '700', color: COLORS.primary }}>Add Row</Text>
+            </Pressable>
+          </View>
+          {vatRows.map((row, idx) => (
+            <View key={row.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+              <TextInput
+                style={[modalStyles.input, { flex: 1, marginBottom: 0 }]}
+                placeholder="0.00"
+                placeholderTextColor={COLORS.muted}
+                value={row.rowAmt}
+                onChangeText={v => setVatRows(prev => prev.map((r, i) => i === idx ? { ...r, rowAmt: v } : r))}
+                keyboardType="decimal-pad"
+              />
+              <View style={{ flexDirection: 'row', gap: 4 }}>
+                {VAT_PRESETS.map(pct => (
+                  <Pressable
+                    key={pct}
+                    onPress={() => { setVatRows(prev => prev.map((r, i) => i === idx ? { ...r, vatPct: pct } : r)); Haptics.selectionAsync(); }}
+                    style={{ paddingHorizontal: 8, paddingVertical: 6, borderRadius: 10, borderWidth: 1, backgroundColor: row.vatPct === pct ? COLORS.primary : COLORS.surface, borderColor: row.vatPct === pct ? COLORS.primary : COLORS.border }}
+                  >
+                    <Text style={{ fontSize: 11, fontWeight: '700', color: row.vatPct === pct ? COLORS.background : COLORS.muted }}>{pct}%</Text>
+                  </Pressable>
+                ))}
+              </View>
+              {vatRows.length > 1 && (
+                <Pressable onPress={() => setVatRows(prev => prev.filter((_, i) => i !== idx))} style={{ padding: 4 }}>
+                  <Feather name="minus-circle" size={18} color={COLORS.danger} />
+                </Pressable>
+              )}
+            </View>
+          ))}
+          <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', gap: 6, marginBottom: 14, paddingHorizontal: 2 }}>
+            <Text style={{ fontSize: 11, color: COLORS.muted }}>Row total:</Text>
+            <Text style={{ fontSize: 13, fontWeight: '700', color: vatRows.length === 1 ? COLORS.muted : rowMismatch ? COLORS.danger : COLORS.success }}>
+              {rowTotal.toFixed(2)}
+            </Text>
+            {vatRows.length > 1 && rowMismatch && (
+              <Text style={{ fontSize: 11, color: COLORS.danger }}>≠ {amtNum.toFixed(2)}</Text>
+            )}
           </View>
 
           <Text style={modalStyles.label}>{t('category')}</Text>
@@ -2476,9 +2526,11 @@ function TransactionEditModal({ tx, onClose, onSave, currency }: {
 
   return (
     <Modal visible={!!tx} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={{ flex: 1 }} onPress={onClose} />
+      <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)' }}>
+        <Pressable style={{ flex: 1 }} onPress={onClose} />
+      </View>
       <View style={{
-        backgroundColor: COLORS.card,
+        backgroundColor: '#1a1a1a',
         borderTopLeftRadius: 24, borderTopRightRadius: 24,
         borderTopWidth: 1, borderColor: COLORS.border,
         paddingBottom: insets.bottom + 20,
