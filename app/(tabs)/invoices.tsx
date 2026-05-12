@@ -26,7 +26,7 @@ try { Print = require('expo-print'); } catch {}
 try { Sharing = require('expo-sharing'); } catch {}
 try { FileSystem = require('expo-file-system/legacy'); } catch {}
 
-function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
+function genId() { return crypto.randomUUID(); }
 
 // ─── Invoice PDF HTML builder ─────────────────────────────────────────────────
 // Shared template: produces the same layout as the web jsPDF output.
