@@ -158,6 +158,31 @@ function extractDate(text: string): string | null {
   return null;
 }
 
+// Parse Finnish ALV breakdown table (ALV% / Veroton / Vero / Verollinen)
+function extractAlvBreakdown(text: string): { vatRate: number; grossAmount: number }[] {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const lower = lines[i].toLowerCase();
+    if ((lower.includes('alv') || lower.includes('moms')) &&
+        (lower.includes('verollinen') || lower.includes('yhteensä') || lower.includes('veroll') || lower.includes('summa'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx === -1) return [];
+  const results: { vatRate: number; grossAmount: number }[] = [];
+  for (let i = headerIdx + 1; i < lines.length && i < headerIdx + 8; i++) {
+    const nums = lines[i].match(/\d+[,.]\d+/g);
+    if (!nums || nums.length < 2) break;
+    const vatRate = parseFloat(nums[0].replace(',', '.'));
+    const gross = parseFloat(nums[nums.length - 1].replace(',', '.'));
+    if (isNaN(vatRate) || isNaN(gross) || vatRate < 0 || vatRate > 100 || gross <= 0) break;
+    results.push({ vatRate, grossAmount: gross });
+  }
+  return results.length >= 2 ? results : [];
+}
+
 // Extracts transaction rows from raw OCR text returned by the google-vision-ocr edge function.
 function parseBankStatementText(rawText: string): Transaction[] {
   console.log('INPUT STARTS WITH:', rawText.substring(0, 20));
@@ -953,7 +978,8 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
         merchant,
         amount,
         date,
-        confidence: 0.8 // Default confidence for receipt OCR
+        confidence: 0.8,
+        vatBreakdown: extractAlvBreakdown(fullText),
       };
     })()
       .then((result: any) => {
@@ -968,14 +994,20 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
         console.log('📋 merchant:', merchant, 'amount:', amount, 'date:', date);
 
         setDesc(String(merchant));
-        const detectedAmt = amount !== null && amount !== undefined ? String(amount) : '';
-        setAmount(detectedAmt);
-        if (date) {
-          try { setSelectedDate(new Date(date + 'T12:00:00')); } catch (e) {}
-        }
-        const detectedVat = (result?.vat_rate !== null && result?.vat_rate !== undefined) ? Number(result.vat_rate) : 25.5;
-        setVatRows([{ id: generateId(), rowAmt: detectedAmt, vatPct: detectedVat }]);
+        if (date) { try { setSelectedDate(new Date(date + 'T12:00:00')); } catch (e) {} }
         if (result?.category && result.category !== 'other') setCategory(result.category);
+
+        const breakdown: { vatRate: number; grossAmount: number }[] = result?.vatBreakdown ?? [];
+        if (breakdown.length >= 2) {
+          const totalGross = breakdown.reduce((s, r) => s + r.grossAmount, 0);
+          setAmount(totalGross.toFixed(2));
+          setVatRows(breakdown.map(r => ({ id: generateId(), rowAmt: r.grossAmount.toFixed(2), vatPct: r.vatRate })));
+        } else {
+          const detectedAmt = amount !== null && amount !== undefined ? String(amount) : '';
+          setAmount(detectedAmt);
+          const detectedVat = (result?.vat_rate !== null && result?.vat_rate !== undefined) ? Number(result.vat_rate) : 25.5;
+          setVatRows([{ id: generateId(), rowAmt: detectedAmt, vatPct: detectedVat }]);
+        }
         setConfidence(result?.confidence ?? null);
       })
       .catch((err: Error) => {
