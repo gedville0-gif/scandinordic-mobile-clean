@@ -2182,6 +2182,7 @@ export default function EarningsScreen() {
 
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [editTx, setEditTx] = useState<Transaction | null>(null);
 
   useEffect(() => {
     setSelectMode(false);
@@ -2357,7 +2358,7 @@ export default function EarningsScreen() {
                   currency={currency}
                   selectMode={selectMode}
                   selected={selectedIds.has(tx.id)}
-                  onPress={() => selectMode ? handleToggleSelect(tx.id) : handleDelete(tx.id)}
+                  onPress={() => selectMode ? handleToggleSelect(tx.id) : setEditTx(tx)}
                   onLongPress={() => handleLongPress(tx)}
                   onReceiptPress={tx.receipt_url ? (url) => setReceiptViewUrl(url) : undefined}
                 />
@@ -2424,6 +2425,13 @@ export default function EarningsScreen() {
         </View>
       </Modal>
 
+      <TransactionEditModal
+        tx={editTx}
+        onClose={() => setEditTx(null)}
+        onSave={async (updated) => { await saveTransaction(updated); await load(); setEditTx(null); }}
+        currency={currency}
+      />
+
       {dialog}
     </View>
   );
@@ -2436,6 +2444,105 @@ function SummaryCol({ label, value, color }: { label: string; value: string; col
       <Text style={styles.summaryColLabel}>{label}</Text>
       <Text style={[styles.summaryColValue, { color }]}>{value}</Text>
     </View>
+  );
+}
+
+function TransactionEditModal({ tx, onClose, onSave, currency }: {
+  tx: Transaction | null;
+  onClose: () => void;
+  onSave: (t: Transaction) => Promise<void>;
+  currency: Currency;
+}) {
+  const insets = useSafeAreaInsets();
+  const [category, setCategory] = useState('');
+  const [vatRate, setVatRate] = useState(0);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (tx) { setCategory(tx.category); setVatRate(tx.vatRate ?? 0); }
+  }, [tx]);
+
+  if (!tx) return null;
+
+  const cats = tx.type === 'income' ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
+  const isIncome = tx.type === 'income';
+  const amtColor = isIncome ? COLORS.success : COLORS.danger;
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({ ...tx, category, veroCategory: getVeroCategory(category, tx.type), vatRate });
+    setSaving(false);
+  };
+
+  return (
+    <Modal visible={!!tx} transparent animationType="slide" onRequestClose={onClose}>
+      <Pressable style={{ flex: 1 }} onPress={onClose} />
+      <View style={{
+        backgroundColor: COLORS.card,
+        borderTopLeftRadius: 24, borderTopRightRadius: 24,
+        borderTopWidth: 1, borderColor: COLORS.border,
+        paddingBottom: insets.bottom + 20,
+      }}>
+        <View style={{ alignItems: 'center', paddingTop: 12, paddingBottom: 4 }}>
+          <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: COLORS.border }} />
+        </View>
+        <View style={{ paddingHorizontal: 20, paddingTop: 8, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border }}>
+          <Text style={{ fontSize: 15, fontWeight: '600', color: COLORS.text }} numberOfLines={1}>{tx.description}</Text>
+          <Text style={{ fontSize: 20, fontWeight: '700', color: amtColor, marginTop: 2 }}>
+            {isIncome ? '+' : '-'}{formatCurrency(tx.amount, currency)}
+          </Text>
+        </View>
+        <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ padding: 20, gap: 20 }} showsVerticalScrollIndicator={false}>
+          <View>
+            <Text style={{ fontSize: 10, fontWeight: '700', color: COLORS.primary, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 10 }}>Category</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 7 }}>
+              {cats.map(c => (
+                <Pressable
+                  key={c.id}
+                  onPress={() => setCategory(c.id)}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 5,
+                    paddingHorizontal: 12, paddingVertical: 7, borderRadius: 20, borderWidth: 1,
+                    backgroundColor: category === c.id ? COLORS.primaryDim : COLORS.surface,
+                    borderColor: category === c.id ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <Feather name={c.icon as any} size={11} color={category === c.id ? COLORS.primary : COLORS.muted} />
+                  <Text style={{ fontSize: 12, fontWeight: '500', color: category === c.id ? COLORS.primary : COLORS.muted }}>{c.label}</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+          <View>
+            <Text style={{ fontSize: 10, fontWeight: '700', color: COLORS.primary, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 10 }}>VAT Rate</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {VAT_PRESETS.map(pct => (
+                <Pressable
+                  key={pct}
+                  onPress={() => setVatRate(pct)}
+                  style={{
+                    flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 12, borderWidth: 1,
+                    backgroundColor: vatRate === pct ? COLORS.primary : COLORS.surface,
+                    borderColor: vatRate === pct ? COLORS.primary : COLORS.border,
+                  }}
+                >
+                  <Text style={{ fontSize: 13, fontWeight: '700', color: vatRate === pct ? COLORS.background : COLORS.muted }}>{pct}%</Text>
+                </Pressable>
+              ))}
+            </View>
+          </View>
+        </ScrollView>
+        <View style={{ paddingHorizontal: 20, paddingTop: 12 }}>
+          <Pressable
+            onPress={handleSave}
+            disabled={saving}
+            style={{ backgroundColor: COLORS.primary, borderRadius: 14, paddingVertical: 16, alignItems: 'center' }}
+          >
+            <Text style={{ fontSize: 14, fontWeight: '700', color: COLORS.background }}>{saving ? 'Saving…' : 'Save Changes'}</Text>
+          </Pressable>
+        </View>
+      </View>
+    </Modal>
   );
 }
 
