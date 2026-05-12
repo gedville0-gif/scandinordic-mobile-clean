@@ -704,7 +704,6 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
 
   // BILL TO
   const [clientName, setClientName] = useState('');
-  const [clientCompanyName, setClientCompanyName] = useState('');
   const [clientEmail, setClientEmail] = useState('');
   const [clientAddress, setClientAddress] = useState('');
   const [clientPostalCode, setClientPostalCode] = useState('');
@@ -742,7 +741,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       setFromBusinessId(iv.fromBusinessId || ''); setFromVatNumber(iv.fromVatNumber || '');
       setFromEmail(iv.fromEmail || ''); setFromPhone(iv.fromPhone || '');
       setFromIban(iv.fromIban || ''); setFromBic(iv.fromBic || '');
-      setClientName(iv.clientName || ''); setClientCompanyName(iv.clientCompanyName || '');
+      setClientName(iv.clientName || '');
       setClientEmail(iv.clientEmail || ''); setClientAddress(iv.clientAddress || '');
       setClientPostalCode(iv.clientPostalCode || ''); setClientCity(iv.clientCity || '');
       setClientCountry(iv.clientCountry || ''); setClientCompanyId(iv.clientCompanyId || '');
@@ -766,7 +765,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
 
   const reset = () => {
     setFromEditOpen(false);
-    setClientName(''); setClientCompanyName(''); setClientEmail('');
+    setClientName(''); setClientEmail('');
     setClientAddress(''); setClientPostalCode(''); setClientCity('');
     setClientCountry(''); setClientCompanyId(''); setClientVatId(''); setClientPhone('');
     setReferenceNumber(''); setPaymentTerms('Net 30'); setStatus('draft');
@@ -833,7 +832,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       invoiceNumber: nextInvNum,
       fromName, fromAddress, fromBusinessId, fromVatNumber, fromEmail, fromPhone, fromIban, fromBic,
       clientName: clientName.trim(),
-      clientCompanyName, clientCompanyId, clientVatId,
+      clientCompanyId, clientVatId,
       clientAddress, clientCity, clientPostalCode, clientCountry,
       clientEmail, clientPhone,
       issueDate, dueDate, referenceNumber, paymentTerms,
@@ -902,7 +901,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                 <Pressable onPress={() => setFromEditOpen(false)}><Text style={m.cardClose}>✕ Done</Text></Pressable>
               </View>
               {([
-                [t('companyName'), fromName, setFromName],
+                ['NAME / COMPANY NAME', fromName, setFromName],
                 [t('streetAddress'), fromAddress, setFromAddress],
                 [t('companyId'), fromBusinessId, setFromBusinessId],
                 [t('vatNo'), fromVatNumber, setFromVatNumber],
@@ -922,8 +921,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
           {/* ── 2. BILL TO ── */}
           <SectionLabel label={t('billTo')} />
           <View style={m.card}>
-            <Field label={t('clientName') + ' *'} value={clientName} onChangeText={setClientName} />
-            <Field label={t('clientCompanyName')} value={clientCompanyName} onChangeText={setClientCompanyName} />
+            <Field label="NAME / COMPANY NAME *" value={clientName} onChangeText={setClientName} />
             <Field label={t('email')} value={clientEmail} onChangeText={setClientEmail} keyboardType="email-address" />
             <Field label={t('clientAddress')} value={clientAddress} onChangeText={setClientAddress} />
             <View style={m.twoCol}>

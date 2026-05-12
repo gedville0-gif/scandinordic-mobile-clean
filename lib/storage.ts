@@ -90,7 +90,7 @@ export async function saveInvoice(inv: Invoice): Promise<void> {
   console.log('[invoices] upserting:', inv);
   const { error } = await supabase
     .from('invoices')
-    .upsert({ id: inv.id, user_id: userId, invoice_number: inv.invoiceNumber, invoice_date: inv.issueDate, due_date: inv.dueDate, customer_name: inv.clientName, total_amount: inv.totalAmount, status: inv.status, data: inv }, { onConflict: 'id' });
+    .upsert({ id: inv.id, user_id: userId, invoice_number: inv.invoiceNumber, invoice_date: inv.issueDate, due_date: inv.dueDate, customer_name: inv.clientName, from_name: inv.fromName, total_amount: inv.totalAmount, status: inv.status, data: inv }, { onConflict: 'id' });
   if (error) console.error('[invoices] upsert failed:', error);
 }
 
