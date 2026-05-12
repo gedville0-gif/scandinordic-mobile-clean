@@ -59,6 +59,17 @@ export async function deleteTransaction(id: string): Promise<void> {
   if (error) console.error('[transactions] delete failed:', error);
 }
 
+export async function bulkDeleteTransactions(ids: string[]): Promise<void> {
+  const userId = await getUid();
+  if (!userId || ids.length === 0) return;
+  const { error } = await supabase
+    .from('transactions')
+    .delete()
+    .in('id', ids)
+    .eq('user_id', userId);
+  if (error) console.error('[transactions] bulk delete failed:', error);
+}
+
 // ─── Invoices ─────────────────────────────────────────────────────────────────
 
 export async function getInvoices(): Promise<Invoice[]> {

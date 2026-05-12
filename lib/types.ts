@@ -24,6 +24,7 @@ export interface InvoiceLineItem {
   unit: string;
   unitPrice: number;
   vatPercent: number;
+  vatIncluded?: boolean;
   discount: string;
   lineTotal: number;
   lineVatAmount: number;

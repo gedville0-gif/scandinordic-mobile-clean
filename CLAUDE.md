@@ -32,10 +32,12 @@
 ## Supabase Tables (created so far)
 - `team_payroll` — id, name, role, gross_salary, hours_per_month, tax_rate_override, created_at
 
-## Finnish VAT Rates (ALV 2025)
-- Food/groceries: 14%
-- General/fuel: 25.5%
-- Services: 25.5%
+## Finnish VAT Rates (ALV 2026)
+- Food/groceries: 13.5%
+- General/fuel/services: 25.5%
+- Special (books/newspapers): 10%
+- Zero-rated: 0%
+- Exempt: no VAT
 
 ## Finnish Payroll Rates (2025)
 - Employee: TyEL 7.45%, TVR 0.79%, SV 1.53%

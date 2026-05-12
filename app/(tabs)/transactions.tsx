@@ -11,7 +11,7 @@ import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { TransactionItem } from '@/components/TransactionItem';
-import { getTransactions, saveTransaction, deleteTransaction, getInvoices, getSettings } from '@/lib/storage';
+import { getTransactions, saveTransaction, deleteTransaction, bulkDeleteTransactions, getInvoices, getSettings } from '@/lib/storage';
 import { formatCurrency } from '@/lib/currency';
 import type { Transaction, TransactionType, Currency } from '@/lib/types';
 import { INCOME_CATEGORIES, EXPENSE_CATEGORIES, detectCategory } from '@/constants/categories';
@@ -19,6 +19,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { useLocalSearchParams } from 'expo-router';
 import { useAppDialog } from '@/components/AppDialog';
 import DatePickerModal from '@/components/DatePickerModal';
+import { PDFReviewModal } from '@/components/PDFReviewModal';
 import { supabase } from '@/lib/supabase';
 import { decode } from 'base64-arraybuffer';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -37,7 +38,7 @@ import { parseFinnishBankStatement, type ParsedTransaction } from '@/src/service
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const VAT_PRESETS = [0, 13.5, 14, 25.5];
+const VAT_PRESETS = [0, 10, 13.5, 25.5];
 
 function getCatIcon(key: string): string {
   return [...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES].find(c => c.id === key)?.icon ?? 'tag';
@@ -1256,11 +1257,17 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [openField, setOpenField] = useState<keyof CsvMapping | null>(null);
+  const [reviewTxs, setReviewTxs] = useState<Transaction[] | null>(null);
+  const [currency, setCurrency] = useState<Currency>('EUR');
+
+  useEffect(() => {
+    getSettings().then(s => setCurrency(s.currency));
+  }, []);
 
   const reset = () => {
     setStep('idle'); setRows([]); setHeaders([]); setDisplayHeaders([]);
     setMapping({ desc: '', amount: '', date: '', category: '' });
-    setError(''); setLoading(false); setOpenField(null);
+    setError(''); setLoading(false); setOpenField(null); setReviewTxs(null);
   };
   useEffect(() => { if (!visible) reset(); }, [visible]);
 
@@ -1413,17 +1420,8 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         ? `${actualBank.toUpperCase()} Bank (auto-corrected from ${bankId.toUpperCase()})`
         : `${actualBank.toUpperCase()} Bank`;
 
-      const idx = await showDialog(
-        `Import ${transactions.length} transaction${transactions.length === 1 ? '' : 's'}?`,
-        `${incomeCount} income · ${expenseCount} expense · ${bankLabel}`,
-        [{ text: t('cancel'), style: 'cancel' }, { text: `Import ${transactions.length}` }]
-      );
-
-      if (idx === 1) {
-        console.log('✅ User confirmed import');
-        onBulkSave(transactions);
-        onClose();
-      }
+      console.log(`📋 Opening review modal for ${transactions.length} transactions`);
+      setReviewTxs(transactions);
       return;
 
       if (visionError) {
@@ -1585,6 +1583,7 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
   };
 
   return (
+    <>
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <KeyboardAvoidingView style={{ flex: 1, backgroundColor: COLORS.background }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         {/* Header */}
@@ -1791,6 +1790,15 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         {csvDialog}
       </KeyboardAvoidingView>
     </Modal>
+
+    <PDFReviewModal
+      visible={reviewTxs !== null}
+      transactions={reviewTxs ?? []}
+      currency={currency}
+      onConfirm={(confirmed) => { onBulkSave(confirmed); onClose(); }}
+      onCancel={() => setReviewTxs(null)}
+    />
+    </>
   );
 }
 
@@ -2214,7 +2222,7 @@ export default function EarningsScreen() {
       [{ text: t('cancel'), style: 'cancel' }, { text: t('delete'), style: 'destructive' }]
     );
     if (idx === 1) {
-      for (const id of selectedIds) { await deleteTransaction(id); }
+      await bulkDeleteTransactions([...selectedIds]);
       await load();
       exitSelectMode();
     }

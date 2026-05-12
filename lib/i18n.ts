@@ -343,6 +343,10 @@ const translations: Record<Language, Translations> = {
     reimbursement: 'Reimbursement',
     mealUnder6h: 'Under 6h — no allowance',
     mealUnder6hHint: 'Meal allowance requires at least 6 hours away from home.',
+    reviewImport: 'Review Import',
+    vatExempt: 'Exempt',
+    bulkSetVat: 'Set VAT for all',
+    importAll: 'Import All',
   },
   fi: {
     welcomeBack: 'Tervetuloa takaisin',
@@ -684,6 +688,10 @@ const translations: Record<Language, Translations> = {
     reimbursement: 'Korvaus',
     mealUnder6h: 'Alle 6h — ei korvausta',
     mealUnder6hHint: 'Ateriakorvaus vaatii vähintään 6 tunnin poissaolon kotoa.',
+    reviewImport: 'Tarkista tuonti',
+    vatExempt: 'ALV-vapaa',
+    bulkSetVat: 'Aseta ALV kaikille',
+    importAll: 'Tuo kaikki',
   },
   sv: {
     welcomeBack: 'Välkommen tillbaka',
@@ -1025,6 +1033,10 @@ const translations: Record<Language, Translations> = {
     reimbursement: 'Ersättning',
     mealUnder6h: 'Under 6h — ingen ersättning',
     mealUnder6hHint: 'Måltidsersättning kräver minst 6 timmar hemifrån.',
+    reviewImport: 'Granska import',
+    vatExempt: 'Momsfri',
+    bulkSetVat: 'Ange moms för alla',
+    importAll: 'Importera alla',
   },
   da: {
     welcomeBack: 'Velkommen tilbage',
@@ -1366,6 +1378,10 @@ const translations: Record<Language, Translations> = {
     reimbursement: 'Godtgørelse',
     mealUnder6h: 'Under 6h — ingen godtgørelse',
     mealUnder6hHint: 'Måltidsgodtgørelse kræver mindst 6 timers fravær hjemmefra.',
+    reviewImport: 'Gennemse import',
+    vatExempt: 'Momsfritaget',
+    bulkSetVat: 'Angiv moms for alle',
+    importAll: 'Importer alle',
   },
 };
 

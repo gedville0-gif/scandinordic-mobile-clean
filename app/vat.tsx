@@ -51,18 +51,18 @@ export default function VATScreen() {
   }, [transactions, period]);
 
   const vatCollected = useMemo(
-    () => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount * (tx.vatRate || 0) / 100, 0),
+    () => filtered.filter(tx => tx.type === 'income' && tx.vatRate != null).reduce((s, tx) => s + tx.amount * (tx.vatRate ?? 0) / 100, 0),
     [filtered],
   );
   const vatPaid = useMemo(
-    () => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount * (tx.vatRate || 0) / 100, 0),
+    () => filtered.filter(tx => tx.type === 'expense' && tx.vatRate != null).reduce((s, tx) => s + tx.amount * (tx.vatRate ?? 0) / 100, 0),
     [filtered],
   );
   const vatPayable = vatCollected - vatPaid;
 
   // Breakdown by VAT rate
   const rateBreakdown = useMemo(() => {
-    const rates = [0, 10, 14, 24, 25];
+    const rates = [0, 10, 13.5, 25.5];
     return rates.map(rate => {
       const collected = filtered.filter(tx => tx.type === 'income' && (tx.vatRate || 0) === rate)
         .reduce((s, tx) => s + tx.amount * rate / 100, 0);
@@ -81,7 +81,7 @@ export default function VATScreen() {
 
   // Recent transactions with VAT
   const vatTxs = useMemo(
-    () => [...filtered].filter(tx => (tx.vatRate || 0) > 0)
+    () => [...filtered].filter(tx => tx.vatRate != null)
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, 10),
     [filtered],

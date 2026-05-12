@@ -54,6 +54,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "pdfjs-dist": "^3.11.174",
     "typescript": "~5.9.2"
   },
   "private": true

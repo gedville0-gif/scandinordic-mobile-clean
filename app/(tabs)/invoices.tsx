@@ -125,7 +125,7 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
   const hasDiscount = lineItems.some(li => li.discount?.trim());
 
   const preDiscountSubtotal = lineItems.reduce((s, li) =>
-    s + (vatIncluded
+    s + (li.vatIncluded
       ? li.quantity * li.unitPrice / (1 + li.vatPercent / 100)
       : li.quantity * li.unitPrice), 0);
 
@@ -148,8 +148,9 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
   }
 
   // Meta bar total: net when VAT excluded (mirrors web metaTotalAmt)
-  const vatModeLabel = vatIncluded ? pdfT('vatIncluded') : pdfT('vatExcluded');
-  const metaTotalAmt = vatIncluded ? totalAmount : totalAmount - (vatAmount || 0);
+  const anyVatIncluded = lineItems.some(li => li.vatIncluded);
+  const vatModeLabel = anyVatIncluded ? pdfT('vatIncluded') : pdfT('vatExcluded');
+  const metaTotalAmt = anyVatIncluded ? totalAmount : totalAmount - (vatAmount || 0);
 
   // ── Barcode SVG — same bit-pattern algorithm as web generatePdf.ts ──────────
   const buildBarcodeSvg = (value: string, w: number, h: number): string => {
@@ -437,12 +438,12 @@ function parseDiscount(discount: string, gross: number): number {
   return isNaN(val) ? 0 : val;
 }
 
-function recalcLineItem(li: InvoiceLineItem, vatIncluded: boolean): InvoiceLineItem {
+function recalcLineItem(li: InvoiceLineItem): InvoiceLineItem {
   const gross = li.quantity * li.unitPrice;
   const discAmt = parseDiscount(li.discount, gross);
   const afterDiscount = Math.max(0, gross - discAmt);
   let lineNet: number, lineVatAmount: number, lineTotal: number;
-  if (vatIncluded) {
+  if (li.vatIncluded) {
     lineTotal = afterDiscount;
     lineNet = lineTotal / (1 + li.vatPercent / 100);
     lineVatAmount = lineTotal - lineNet;
@@ -455,7 +456,7 @@ function recalcLineItem(li: InvoiceLineItem, vatIncluded: boolean): InvoiceLineI
 }
 
 function defaultLineItem(): InvoiceLineItem {
-  return { id: genId(), description: '', period: '', quantity: 1, unit: 'pcs', unitPrice: 0, vatPercent: 25.5, discount: '', lineTotal: 0, lineVatAmount: 0 };
+  return { id: genId(), description: '', period: '', quantity: 1, unit: 'pcs', unitPrice: 0, vatPercent: 25.5, vatIncluded: false, discount: '', lineTotal: 0, lineVatAmount: 0 };
 }
 
 function calcDueDateStr(issueDateStr: string, term: string): string {
@@ -718,8 +719,8 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
   const [status, setStatus] = useState<Invoice['status']>('draft');
 
   // Line items
-  const [vatIncluded, setVatIncluded] = useState(false);
   const [lineItems, setLineItems] = useState<InvoiceLineItem[]>([defaultLineItem()]);
+  const [rawUnitPrices, setRawUnitPrices] = useState<Record<string, string>>({});
 
   // Notes
   const [additionalInfo, setAdditionalInfo] = useState('');
@@ -746,7 +747,6 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       setReferenceNumber(iv.referenceNumber || '');
       setPaymentTerms(iv.paymentTerms || 'Net 30');
       setStatus(iv.status);
-      setVatIncluded(iv.vatIncluded || false);
       setLineItems(iv.lineItems?.length ? iv.lineItems : [defaultLineItem()]);
       setAdditionalInfo(iv.additionalInfo || '');
     } else {
@@ -765,7 +765,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
     setClientAddress(''); setClientPostalCode(''); setClientCity('');
     setClientCountry(''); setClientCompanyId(''); setClientVatId(''); setClientPhone('');
     setReferenceNumber(''); setPaymentTerms('Net 30'); setStatus('draft');
-    setVatIncluded(false); setLineItems([defaultLineItem()]); setAdditionalInfo('');
+    setLineItems([defaultLineItem()]); setAdditionalInfo('');
   };
 
   const handleClose = () => { reset(); onClose(); };
@@ -781,8 +781,14 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
         const num = parseFloat(value.replace(',', '.'));
         updated = { ...li, [field]: isNaN(num) ? 0 : num };
       }
-      return recalcLineItem(updated, vatIncluded);
+      return recalcLineItem(updated);
     }));
+  };
+
+  const toggleLineItemVat = (id: string, value: boolean) => {
+    setLineItems(prev => prev.map(li =>
+      li.id === id ? recalcLineItem({ ...li, vatIncluded: value }) : li
+    ));
   };
 
   const addLineItem = () => {
@@ -797,12 +803,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
   };
 
   const applyVatPreset = (pct: number) => {
-    setLineItems(prev => prev.map(li => recalcLineItem({ ...li, vatPercent: pct }, vatIncluded)));
-  };
-
-  const handleVatToggle = (val: boolean) => {
-    setVatIncluded(val);
-    setLineItems(prev => prev.map(li => recalcLineItem(li, val)));
+    setLineItems(prev => prev.map(li => recalcLineItem({ ...li, vatPercent: pct })));
   };
 
   // Totals
@@ -831,7 +832,7 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       clientAddress, clientCity, clientPostalCode, clientCountry,
       clientEmail, clientPhone,
       issueDate, dueDate, referenceNumber, paymentTerms,
-      vatIncluded,
+      vatIncluded: lineItems.some(li => li.vatIncluded ?? false),
       lineItems,
       amount: netSubtotal,
       vatAmount: vatTotal,
@@ -986,12 +987,6 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
 
           {/* ── 4. LINE ITEMS ── */}
           <SectionLabel label={t('lineItems')} />
-          <View style={m.vatBar}>
-            <View style={m.vatToggleRow}>
-              <Switch value={vatIncluded} onValueChange={handleVatToggle} trackColor={{ true: COLORS.primary }} thumbColor={COLORS.background} />
-              <Text style={m.vatToggleLabel}>{vatIncluded ? t('vatIncluded') : t('vatExcluded')}</Text>
-            </View>
-          </View>
 
           {lineItems.map((li, idx) => {
             const lineNet = li.lineTotal - li.lineVatAmount;
@@ -1024,7 +1019,6 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                   {([
                     [t('quantity'), 'quantity', 'decimal-pad'],
                     [t('unit'), 'unit', 'default'],
-                    [t('unitPrice'), 'unitPrice', 'decimal-pad'],
                   ] as [string, string, any][]).map(([lbl, field, kb]) => (
                     <View key={field} style={m.lineGridCell}>
                       <Text style={m.lineGridLabel}>{lbl}</Text>
@@ -1038,6 +1032,22 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                       />
                     </View>
                   ))}
+                  <View style={m.lineGridCell}>
+                    <Text style={m.lineGridLabel}>{t('unitPrice')}</Text>
+                    <TextInput
+                      style={m.lineGridInput}
+                      value={rawUnitPrices[li.id] !== undefined ? rawUnitPrices[li.id] : String(li.unitPrice ?? '')}
+                      onChangeText={v => setRawUnitPrices(prev => ({ ...prev, [li.id]: v }))}
+                      onBlur={() => {
+                        const raw = rawUnitPrices[li.id] ?? String(li.unitPrice);
+                        updateLineItem(li.id, 'unitPrice', raw);
+                        setRawUnitPrices(prev => { const next = { ...prev }; delete next[li.id]; return next; });
+                      }}
+                      keyboardType="default"
+                      placeholderTextColor={COLORS.muted}
+                      textAlign="center"
+                    />
+                  </View>
                 </View>
                 <View style={m.discRow}>
                   <Text style={m.discLabel}>{t('discountLabel')}</Text>
@@ -1059,6 +1069,15 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                       <Text style={[m.presetChipText, li.vatPercent === pct && m.presetChipTextActive]}>{pct}%</Text>
                     </Pressable>
                   ))}
+                  <View style={m.vatToggleRow}>
+                    <Switch
+                      value={li.vatIncluded ?? false}
+                      onValueChange={v => toggleLineItemVat(li.id, v)}
+                      trackColor={{ true: COLORS.primary }}
+                      thumbColor={COLORS.background}
+                    />
+                    <Text style={m.vatToggleLabel}>{(li.vatIncluded ?? false) ? t('vatIncluded') : t('vatExcluded')}</Text>
+                  </View>
                 </View>
                 <View style={m.lineTotalsRow}>
                   <Text style={m.lineTotalsMeta}>{t('net')}: <Text style={{ color: COLORS.text }}>{formatCurrency(lineNet, currency)}</Text></Text>

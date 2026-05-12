@@ -6,6 +6,7 @@ export interface ParsedTransaction {
   type: 'income' | 'expense';
   category: string;
   veroCategory?: string;
+  payment_method?: string;
 }
 
 export interface BankParserResult {
@@ -185,65 +186,219 @@ export function parseFinnishBankStatement(rawText: string): BankParserResult {
 
 // OP Bank specific parsing
 function parseOPBankStatement(lines: string[], transactions: ParsedTransaction[]): void {
-  console.log('🔍 Parsing OP bank statement');
+  console.log('🔍 Parsing OP bank statement with multi-line blocks');
 
-  const transactionPattern = /(\d{1,2}\.?\d{1,2}\.?\d{2,4})\s+(.+?)\s+([-+]?\d+[.,]\d{2})/;
+  // OP Bank payment method keywords
+  const paymentMethods = [
+    'BANK TRANSFER',
+    'CARD PAYMENT',
+    'PAYMENT SERVICE',
+    'TRANSACTION FEE',
+    'PANKKISIIRTO',
+    'KORTTIMAKSU',
+    'MAKSUPALVELU',
+    'PALVELUMAKSU'
+  ];
 
-  for (const line of lines) {
-    const match = line.match(transactionPattern);
-    if (match) {
-      const [, dateStr, description, amountStr] = match;
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
 
-      const date = parseFinDate(dateStr);
-      const amount = parseFinAmount(amountStr);
-      const cleanDescription = description.trim();
+    // Check if this line starts a new transaction ("D Mon YYYY" format)
+    const dateMatch = line.match(/^(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|tammi|helmi|maalis|huhti|touko|kesä|heinä|elo|syys|loka|marras|joulu)\s+(\d{4})/i);
+    if (dateMatch) {
+      const [, day, monthStr, year] = dateMatch;
+      const transactionBlock: string[] = [];
 
-      if (Math.abs(amount) > 0 && cleanDescription.length > 1) {
-        const { category, veroCategory } = categorizeTransaction(cleanDescription, amount);
+      // Collect all lines in this transaction block until next date or end
+      let j = i;
+      while (j < lines.length) {
+        const currentLine = lines[j];
 
-        transactions.push({
-          id: generateTransactionId(),
-          date,
-          description: cleanDescription,
-          amount: Math.abs(amount),
-          type: amount >= 0 ? 'income' : 'expense',
-          category,
-          veroCategory
-        });
+        // If we hit another date line (and it's not the first one), stop collecting
+        if (j > i && currentLine.match(/^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|tammi|helmi|maalis|huhti|touko|kesä|heinä|elo|syys|loka|marras|joulu)\s+\d{4}/i)) {
+          break;
+        }
+
+        transactionBlock.push(currentLine);
+        j++;
       }
+
+      // Parse the transaction block
+      if (transactionBlock.length >= 2) {
+        try {
+          let payment_method = '';
+          let amount = 0;
+          let vendor = '';
+
+          // Find payment method line (contains keywords and amount)
+          for (const blockLine of transactionBlock) {
+            const methodFound = paymentMethods.find(method =>
+              blockLine.toUpperCase().includes(method)
+            );
+
+            if (methodFound) {
+              payment_method = methodFound;
+
+              // Extract amount from same line as payment method
+              const amountMatch = blockLine.match(/([-+]?\d+[.,]\d{2})/);
+              if (amountMatch) {
+                amount = parseFinAmount(amountMatch[1]);
+                break;
+              }
+            }
+          }
+
+          // Find vendor (line after payment method, or first non-date line)
+          let foundPaymentMethod = false;
+          for (const blockLine of transactionBlock) {
+            if (foundPaymentMethod) {
+              // This is the line after payment method = vendor
+              vendor = blockLine.trim();
+              break;
+            }
+
+            // Check if this line contains a payment method
+            if (paymentMethods.some(method => blockLine.toUpperCase().includes(method))) {
+              foundPaymentMethod = true;
+            }
+          }
+
+          // If no vendor found after payment method, use first non-date line as fallback
+          if (!vendor) {
+            for (let k = 1; k < transactionBlock.length; k++) {
+              const blockLine = transactionBlock[k].trim();
+              if (blockLine && !paymentMethods.some(method => blockLine.toUpperCase().includes(method))) {
+                vendor = blockLine;
+                break;
+              }
+            }
+          }
+
+          // Convert month name to number
+          const monthMap: { [key: string]: string } = {
+            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06',
+            'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
+            'tammi': '01', 'helmi': '02', 'maalis': '03', 'huhti': '04', 'touko': '05', 'kesä': '06',
+            'heinä': '07', 'elo': '08', 'syys': '09', 'loka': '10', 'marras': '11', 'joulu': '12'
+          };
+
+          const monthNum = monthMap[monthStr.toLowerCase()] || '01';
+          const parsedDate = `${year}-${monthNum}-${day.padStart(2, '0')}`;
+
+          if (Math.abs(amount) > 0 && vendor) {
+            const { category, veroCategory } = categorizeTransaction(vendor, amount);
+
+            transactions.push({
+              id: generateTransactionId(),
+              date: parsedDate,
+              description: vendor,
+              amount: Math.abs(amount),
+              type: amount >= 0 ? 'income' : 'expense',
+              category,
+              veroCategory,
+              payment_method
+            });
+
+            console.log(`📝 OP transaction: ${vendor} | ${payment_method} | ${amount}€`);
+          }
+        } catch (error) {
+          console.log('⚠️ Error parsing OP transaction block:', error);
+        }
+      }
+
+      // Move to next transaction block
+      i = j;
+    } else {
+      i++;
     }
   }
 }
 
 // Nordea Bank specific parsing
 function parseNordeaBankStatement(lines: string[], transactions: ParsedTransaction[]): void {
-  console.log('🔍 Parsing Nordea bank statement');
+  console.log('🔍 Parsing Nordea bank statement with multi-line blocks');
 
-  // Nordea typically has format: Date Description Amount
-  const transactionPattern = /(\d{1,2}\.?\d{1,2}\.?\d{2,4})\s+(.+?)\s+([-+]?\d+[.,]\d{2})/;
-
+  // Find year from Period header line (e.g., "Period: 01.01.2024 - 31.12.2024")
+  let currentYear = new Date().getFullYear().toString();
   for (const line of lines) {
-    const match = line.match(transactionPattern);
-    if (match) {
-      const [, dateStr, description, amountStr] = match;
+    const periodMatch = line.match(/Period:\s*\d{1,2}\.\d{1,2}\.(\d{4})/i);
+    if (periodMatch) {
+      currentYear = periodMatch[1];
+      console.log('📅 Found year in period header:', currentYear);
+      break;
+    }
+  }
 
-      const date = parseFinDate(dateStr);
-      const amount = parseFinAmount(amountStr);
-      const cleanDescription = description.trim();
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
 
-      if (Math.abs(amount) > 0 && cleanDescription.length > 1) {
-        const { category, veroCategory } = categorizeTransaction(cleanDescription, amount);
+    // Check if this line starts a new transaction (DD.MM format at start)
+    const dateMatch = line.match(/^(\d{1,2}\.\d{1,2})\s/);
+    if (dateMatch) {
+      const [, datePrefix] = dateMatch;
+      const transactionBlock: string[] = [];
 
-        transactions.push({
-          id: generateTransactionId(),
-          date,
-          description: cleanDescription,
-          amount: Math.abs(amount),
-          type: amount >= 0 ? 'income' : 'expense',
-          category,
-          veroCategory
-        });
+      // Collect all lines in this transaction block until next date or end
+      let j = i;
+      while (j < lines.length) {
+        const currentLine = lines[j];
+
+        // If we hit another date line (and it's not the first one), stop collecting
+        if (j > i && currentLine.match(/^\d{1,2}\.\d{1,2}\s/)) {
+          break;
+        }
+
+        transactionBlock.push(currentLine);
+        j++;
       }
+
+      // Parse the transaction block
+      if (transactionBlock.length >= 2) {
+        try {
+          // Line 1 of block = vendor (remove date prefix)
+          const vendor = transactionBlock[0].replace(/^\d{1,2}\.\d{1,2}\s+/, '').trim();
+
+          // Line 2 of block = payment_method
+          const payment_method = transactionBlock.length > 1 ? transactionBlock[1].trim() : '';
+
+          // Last line = amount (convert comma to dot)
+          const lastLine = transactionBlock[transactionBlock.length - 1];
+          const amountMatch = lastLine.match(/([-+]?\d+[.,]\d{2})(?:\s*€)?$/);
+
+          if (amountMatch && vendor) {
+            const amountStr = amountMatch[1];
+            const amount = parseFinAmount(amountStr);
+            const fullDate = `${datePrefix}.${currentYear}`;
+            const parsedDate = parseFinDate(fullDate);
+
+            if (Math.abs(amount) > 0) {
+              const { category, veroCategory } = categorizeTransaction(vendor, amount);
+
+              transactions.push({
+                id: generateTransactionId(),
+                date: parsedDate,
+                description: vendor,
+                amount: Math.abs(amount),
+                type: amount >= 0 ? 'income' : 'expense',
+                category,
+                veroCategory,
+                payment_method
+              });
+
+              console.log(`📝 Nordea transaction: ${vendor} | ${payment_method} | ${amount}€`);
+            }
+          }
+        } catch (error) {
+          console.log('⚠️ Error parsing Nordea transaction block:', error);
+        }
+      }
+
+      // Move to next transaction block
+      i = j;
+    } else {
+      i++;
     }
   }
 }

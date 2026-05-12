@@ -1,6 +1,6 @@
-// Supabase Edge Function — google-vision-ocr
+// Supabase Edge Function — Google Vision OCR for Finnish Bank Statements
 // Deploy: supabase functions deploy google-vision-ocr
-// Secret:  supabase secrets set GOOGLE_VISION_API_KEY=<your-key>
+// Usage: POST { image: base64_pdf_string, type: 'bank_statement' }
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 
@@ -10,202 +10,276 @@ const VISION_URL = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGL
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+interface Transaction {
+  date: string;        // YYYY-MM-DD
+  description: string; // merchant name
+  amount: number;      // signed float, negative = expense
+}
+
 serve(async (req: Request) => {
-  // Preflight
+  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS_HEADERS });
   }
 
-  try {
-    const { image } = await req.json() as { image: string };
+  if (req.method !== 'POST') {
+    return json({ error: 'Method not allowed' }, 405);
+  }
 
+  try {
+    console.log('🔄 Processing PDF with Google Vision...');
+
+    const { image, type = 'bank_statement' } = await req.json() as {
+      image: string;
+      type?: string
+    };
+
+    // Validate inputs
     if (!image) {
+      console.error('❌ Missing image field');
       return json({ error: 'Missing image field' }, 400);
     }
+
     if (!GOOGLE_API_KEY) {
-      return json({ error: 'GOOGLE_VISION_API_KEY secret not set' }, 500);
+      console.error('❌ GOOGLE_VISION_API_KEY not configured');
+      return json({ error: 'Google Vision API key not configured' }, 500);
     }
 
-    // ── Call Google Vision TEXT_DETECTION ──────────────────────────────────
-    const visionRes = await fetch(VISION_URL, {
+    console.log(`📄 Processing ${type} with ${image.length} chars of base64 data`);
+
+    // Detect image format
+    let mimeType = 'image/png'; // default
+    if (image.startsWith('JVBERi0')) {
+      console.log('❌ PDF format detected - PDF files are not supported. Please send PNG/JPEG images.');
+      return json({
+        success: false,
+        transactions: [],
+        rawText: '',
+        error: 'PDF format not supported - requires image conversion',
+        suggestion: 'Convert PDF to images first'
+      });
+    } else if (image.startsWith('/9j/')) {
+      mimeType = 'image/jpeg';
+      console.log('📸 Detected JPEG image format');
+    } else if (image.startsWith('iVBORw0')) {
+      mimeType = 'image/png';
+      console.log('📸 Detected PNG image format');
+    } else {
+      console.log('📸 Assuming PNG format for unknown signature');
+    }
+
+    // Call Google Vision Images API for image processing
+    const visionResponse = await fetch(VISION_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         requests: [{
-          image: { content: image },
-          features: [{ type: 'TEXT_DETECTION', maxResults: 1 }],
-        }],
-      }),
+          image: {
+            content: image
+          },
+          features: [
+            { type: 'TEXT_DETECTION', maxResults: 10 },
+            { type: 'DOCUMENT_TEXT_DETECTION', maxResults: 1 }
+          ]
+        }]
+      })
     });
 
-    if (!visionRes.ok) {
-      const err = await visionRes.text();
-      return json({ error: `Vision API error: ${err}` }, 502);
+    if (!visionResponse.ok) {
+      const errorText = await visionResponse.text();
+      console.error('❌ Vision API error:', visionResponse.status, errorText);
+      return json({ error: `Vision API error (${visionResponse.status}): ${errorText}` }, 502);
     }
 
-    const visionData = await visionRes.json();
-    const rawText: string =
-      visionData?.responses?.[0]?.fullTextAnnotation?.text ?? '';
+    const visionData = await visionResponse.json();
+    console.log('✅ Vision API response received');
+    console.log('📊 Response structure:', {
+      hasResponses: !!visionData.responses,
+      responseCount: visionData.responses?.length || 0,
+      hasFullText: !!visionData.responses?.[0]?.fullTextAnnotation,
+      hasTextAnnotations: !!visionData.responses?.[0]?.textAnnotations,
+      textAnnotationCount: visionData.responses?.[0]?.textAnnotations?.length || 0,
+      hasError: !!visionData.responses?.[0]?.error
+    });
 
-    if (!rawText) {
+    // Log any Vision API errors
+    if (visionData.responses?.[0]?.error) {
+      const error = visionData.responses[0].error;
+      console.error('❌ Vision API processing error:', error);
+
       return json({
-        merchant: '', net_amount: null, vat_rate: null,
-        date: null, category: 'other', confidence: 0,
+        success: false,
+        transactions: [],
+        rawText: '',
+        error: `Vision API error: ${error.message || 'Unknown error'}`
       });
     }
 
-    // ── Parse receipt text → structured fields ─────────────────────────────
-    const result = parseReceiptText(rawText);
-    return json(result);
+    // Extract text using multiple methods
+    const response = visionData?.responses?.[0];
+    let fullText = response?.fullTextAnnotation?.text ?? '';
 
-  } catch (err) {
-    return json({ error: String(err) }, 500);
+    // Try TEXT_DETECTION if DOCUMENT_TEXT_DETECTION failed
+    if (!fullText && response?.textAnnotations?.length > 0) {
+      fullText = response.textAnnotations
+        .map((annotation: any) => annotation.description)
+        .join(' ');
+      console.log('📝 Used TEXT_DETECTION fallback');
+    }
+
+    if (!fullText || fullText.trim().length === 0) {
+      console.error('❌ No text extracted from document using any method');
+      console.error('📊 Vision response structure:', JSON.stringify(visionData, null, 2));
+
+      return json({
+        success: false,
+        transactions: [],
+        rawText: '',
+        error: 'No text found in document'
+      });
+    }
+
+    console.log(`📝 Extracted ${fullText.length} characters of text`);
+    console.log(`📝 First 200 chars: "${fullText.substring(0, 200)}"`);
+
+    // Parse transactions from extracted text
+    const transactions = parseTransactions(fullText);
+    console.log(`💰 Parsed ${transactions.length} transactions`);
+
+    // Return success response
+    return json({
+      success: true,
+      transactions,
+      rawText: fullText,
+      debug_text_length: fullText.length,
+      debug_first_500: fullText.substring(0, 500)
+    });
+
+  } catch (error) {
+    console.error('❌ Function error:', error);
+    return json({
+      success: false,
+      transactions: [],
+      rawText: '',
+      error: `Processing failed: ${error.message}`
+    }, 500);
   }
 });
 
-// ── JSON helper ────────────────────────────────────────────────────────────────
+// Parse Finnish bank statement text into transactions
+function parseTransactions(text: string): Transaction[] {
+  console.log('🔍 Parsing transactions from text...');
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-  });
+  const transactions: Transaction[] = [];
+  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // OP Bank format: "2 Mar 2026 -556.66 BANK TRANSFER"
+    const opMatch = line.match(/(\d{1,2})\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{4})\s+([-+]?\d+[.,]\d{2})/i);
+    if (opMatch) {
+      const transaction = parseOPTransaction(opMatch, line, lines, i);
+      if (transaction) {
+        transactions.push(transaction);
+        console.log(`✅ OP: ${transaction.date} | ${transaction.description} | ${transaction.amount}`);
+      }
+      continue;
+    }
+
+    // Nordea format: "DD.MM description amount"
+    const nordeaMatch = line.match(/^(\d{1,2})\.(\d{1,2})\s+(.+?)\s+([-+]?\d+[.,]\d{2})$/);
+    if (nordeaMatch) {
+      const transaction = parseNordeaTransaction(nordeaMatch, line);
+      if (transaction) {
+        transactions.push(transaction);
+        console.log(`✅ Nordea: ${transaction.date} | ${transaction.description} | ${transaction.amount}`);
+      }
+      continue;
+    }
+  }
+
+  return transactions;
 }
 
-// ── Receipt text parser ────────────────────────────────────────────────────────
+// Parse OP Bank transaction
+function parseOPTransaction(match: RegExpMatchArray, line: string, lines: string[], index: number): Transaction | null {
+  try {
+    const day = match[1].padStart(2, '0');
+    const month = getMonthNumber(match[2]);
+    const year = match[3];
+    const amountStr = match[4].replace(',', '.');
 
-interface ParsedReceipt {
-  merchant: string;
-  net_amount: number | null;
-  vat_rate: number | null;
-  date: string | null;
-  category: string;
-  confidence: number;
+    const date = `${year}-${month}-${day}`;
+    const amount = parseFloat(amountStr);
+
+    // Extract description (look for vendor name in current or next lines)
+    let description = line.replace(match[0], '').trim();
+
+    // If description is just payment method, look at next lines for vendor
+    if (description.match(/^(BANK TRANSFER|CARD PAYMENT|PAYMENT SERVICE)$/i)) {
+      for (let j = index + 1; j < Math.min(index + 3, lines.length); j++) {
+        const nextLine = lines[j];
+        if (nextLine && !nextLine.match(/^\d/) && !nextLine.match(/^(MESSAGE|SEPA|Reference)/i)) {
+          description = nextLine.trim();
+          break;
+        }
+      }
+    }
+
+    // Clean up description
+    description = description.replace(/^(BANK TRANSFER|CARD PAYMENT|PAYMENT SERVICE)\s*/i, '').trim();
+    if (!description || description.length < 2) {
+      description = 'Unknown Transaction';
+    }
+
+    return { date, description, amount };
+  } catch (error) {
+    console.warn('⚠️ Failed to parse OP transaction:', error);
+    return null;
+  }
 }
 
-function parseReceiptText(text: string): ParsedReceipt {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  let confidence = 0;
+// Parse Nordea transaction
+function parseNordeaTransaction(match: RegExpMatchArray, line: string): Transaction | null {
+  try {
+    const day = match[1].padStart(2, '0');
+    const month = match[2].padStart(2, '0');
+    const year = new Date().getFullYear().toString(); // Current year
+    const description = match[3].trim();
+    const amountStr = match[4].replace(',', '.');
 
-  // ── MYYJÄ / Merchant ──────────────────────────────────────────────────────
-  // First meaningful line is usually the store name
-  const merchant = lines[0] ?? '';
-  if (merchant.length > 1) confidence += 0.3;
+    const date = `${year}-${month}-${day}`;
+    const amount = parseFloat(amountStr);
 
-  // ── NETTOSUMMA / Net amount ───────────────────────────────────────────────
-  let net_amount: number | null = null;
-
-  const netPatterns: RegExp[] = [
-    /veroton[:\s]+(\d[\d\s,.]+)/i,          // "Veroton 12,50"
-    /netto[:\s]+(\d[\d\s,.]+)/i,             // "Netto 12,50"
-    /yhteens[aä][:\s]+(\d[\d\s,.]+)/i,       // "Yhteensä 15,20"
-    /total[:\s]+(\d[\d\s,.]+)/i,
-    /summa[:\s]+(\d[\d\s,.]+)/i,
-  ];
-
-  for (const pat of netPatterns) {
-    const m = text.match(pat);
-    if (m) {
-      const parsed = parseFinAmount(m[1]);
-      if (parsed !== null) { net_amount = parsed; confidence += 0.25; break; }
+    if (!description || description.length < 2) {
+      return null;
     }
+
+    return { date, description, amount };
+  } catch (error) {
+    console.warn('⚠️ Failed to parse Nordea transaction:', error);
+    return null;
   }
+}
 
-  // Fallback: largest currency amount on the page
-  if (net_amount === null) {
-    const amounts = [...text.matchAll(/(\d{1,5}[,.]\d{2})\s*(?:€|eur)?/gi)]
-      .map(m => parseFinAmount(m[1]))
-      .filter((v): v is number => v !== null);
-    if (amounts.length) {
-      net_amount = Math.max(...amounts);
-      confidence += 0.1;
-    }
-  }
-
-  // ── VAT / ALV ─────────────────────────────────────────────────────────────
-  let vat_rate: number | null = null;
-
-  const vatMatch =
-    text.match(/alv\s+(\d+[,.]\d+|\d+)\s*%/i) ??
-    text.match(/vat\s+(\d+[,.]\d+|\d+)\s*%/i) ??
-    text.match(/(\d+[,.]\d+|\d+)\s*%\s*alv/i) ??
-    text.match(/(?:vat|alv)[^%\d]*(\d+[,.]\d+|\d+)/i);
-
-  if (vatMatch) {
-    const v = parseFloat(vatMatch[1].replace(',', '.'));
-    if (!isNaN(v) && v <= 100) { vat_rate = v; confidence += 0.2; }
-  }
-
-  // Default Finnish standard VAT if not found
-  if (vat_rate === null) vat_rate = 25.5;
-
-  // ── PÄIVÄMÄÄRÄ / Date ─────────────────────────────────────────────────────
-  let date: string | null = null;
-
-  const dateMatch =
-    text.match(/(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{2,4})/) ??
-    text.match(/(\d{4})[.\-](\d{2})[.\-](\d{2})/);
-
-  if (dateMatch) {
-    const raw = dateMatch[0];
-    if (/^\d{4}/.test(raw)) {
-      // Already YYYY-MM-DD
-      date = raw.replace(/[.\-\/]/g, '-').slice(0, 10);
-    } else {
-      // DD.MM.YYYY or DD.MM.YY
-      const [d, mo, y] = raw.split(/[.\-\/]/);
-      const year = y.length === 2 ? `20${y}` : y;
-      date = `${year}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
-    }
-    confidence += 0.15;
-  }
-
-  // ── KATEGORIA / Category ──────────────────────────────────────────────────
-  const category = detectCategory(merchant + ' ' + text);
-  if (category !== 'other') confidence += 0.1;
-
-  return {
-    merchant,
-    net_amount,
-    vat_rate,
-    date,
-    category,
-    confidence: Math.min(Math.round(confidence * 100) / 100, 1),
+// Convert month name to number
+function getMonthNumber(monthName: string): string {
+  const months: { [key: string]: string } = {
+    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+    'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+    'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
   };
+  return months[monthName.toLowerCase()] || '01';
 }
 
-// Parse Finnish number format: "12,50" or "12.50" or "1 234,50"
-function parseFinAmount(raw: string): number | null {
-  const cleaned = raw.replace(/\s/g, '').replace(',', '.');
-  const v = parseFloat(cleaned);
-  return isNaN(v) ? null : v;
-}
-
-// ── Category detection from merchant name + full text ─────────────────────────
-
-function detectCategory(text: string): string {
-  const t = text.toLowerCase();
-
-  if (/k-market|s-market|lidl|prisma|alepa|siwa|valintatalo|foodie|tokmanni|aldi|maximarket/.test(t))
-    return 'groceries';
-  if (/shell|neste|abc\s|st1|teboil|fuel|bensa|diesel|öljy/.test(t))
-    return 'fuel';
-  if (/bauhaus|k-rauta|biltema|rautakesko|byggmakker|timber|lumber/.test(t))
-    return 'materials';
-  if (/elisa|dna|telia|tele2|mobiili|telecom|teliasonera/.test(t))
-    return 'phone';
-  if (/ravintola|restaurant|café|cafe|kahvila|mcdonalds|hesburger|subway|pizza|burger/.test(t))
-    return 'meals';
-  if (/hotelli|hotel|airbnb|booking\.com|sokos/.test(t))
-    return 'accommodation';
-  if (/amazon|verkkokauppa|gigantti|power|jimms|cdon|elektronik/.test(t))
-    return 'equipment';
-  if (/apteekki|pharmacy|boots|yliopiston apteekki/.test(t))
-    return 'health';
-  if (/kesko|rimi|euro[- ]?spar|spar/.test(t))
-    return 'groceries';
-
-  return 'other';
+// JSON response helper
+function json(data: any, status: number = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+  });
 }
