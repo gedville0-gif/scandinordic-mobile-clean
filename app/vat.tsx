@@ -55,7 +55,14 @@ export default function VATScreen() {
     [filtered],
   );
   const vatPaid = useMemo(
-    () => filtered.filter(tx => tx.type === 'expense' && tx.vatRate != null).reduce((s, tx) => s + tx.amount * (tx.vatRate ?? 0) / 100, 0),
+    () => filtered
+      .filter(tx => tx.type === 'expense' && (tx.vatRate != null || (tx.vatRows && tx.vatRows.length > 0)))
+      .reduce((s, tx) => {
+        if (tx.vatRows && tx.vatRows.length >= 2) {
+          return s + tx.vatRows.reduce((rowSum, row) => rowSum + row.grossAmount - row.grossAmount / (1 + row.vatRate / 100), 0);
+        }
+        return s + tx.amount * (tx.vatRate ?? 0) / 100;
+      }, 0),
     [filtered],
   );
   const vatPayable = vatCollected - vatPaid;
@@ -66,8 +73,16 @@ export default function VATScreen() {
     return rates.map(rate => {
       const collected = filtered.filter(tx => tx.type === 'income' && (tx.vatRate || 0) === rate)
         .reduce((s, tx) => s + tx.amount * rate / 100, 0);
-      const paid = filtered.filter(tx => tx.type === 'expense' && (tx.vatRate || 0) === rate)
-        .reduce((s, tx) => s + tx.amount * rate / 100, 0);
+      const paid = filtered.filter(tx => tx.type === 'expense')
+        .reduce((s, tx) => {
+          if (tx.vatRows && tx.vatRows.length >= 2) {
+            const row = tx.vatRows.find(r => r.vatRate === rate);
+            if (!row) return s;
+            return s + row.grossAmount - row.grossAmount / (1 + rate / 100);
+          }
+          if ((tx.vatRate || 0) !== rate) return s;
+          return s + tx.amount * rate / 100;
+        }, 0);
       return { rate, collected, paid, net: collected - paid };
     }).filter(r => r.collected > 0 || r.paid > 0);
   }, [filtered]);
@@ -81,7 +96,7 @@ export default function VATScreen() {
 
   // Recent transactions with VAT
   const vatTxs = useMemo(
-    () => [...filtered].filter(tx => tx.vatRate != null)
+    () => [...filtered].filter(tx => tx.vatRate != null || (tx.vatRows && tx.vatRows.length > 0))
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, 10),
     [filtered],
@@ -210,7 +225,9 @@ export default function VATScreen() {
           {vatTxs.map(tx => {
             const isIncome = tx.type === 'income';
             const color = isIncome ? COLORS.success : COLORS.danger;
-            const vatAmt = tx.amount * (tx.vatRate || 0) / 100;
+            const vatAmt = tx.vatRows && tx.vatRows.length >= 2
+              ? tx.vatRows.reduce((s, row) => s + row.grossAmount - row.grossAmount / (1 + row.vatRate / 100), 0)
+              : tx.amount * (tx.vatRate || 0) / 100;
             const date = new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
             return (
               <View key={tx.id} style={styles.txRow}>
@@ -219,7 +236,7 @@ export default function VATScreen() {
                 </View>
                 <View style={styles.txInfo}>
                   <Text style={styles.txDesc} numberOfLines={1}>{tx.description}</Text>
-                  <Text style={styles.txMeta}>{date} · {tx.vatRate}% {t('vatPercent')}</Text>
+                  <Text style={styles.txMeta}>{date} · {tx.vatRows && tx.vatRows.length >= 2 ? 'Mixed' : `${tx.vatRate}%`} {t('vatPercent')}</Text>
                 </View>
                 <View style={styles.txRight}>
                   <Text style={[styles.txVat, { color }]}>
