@@ -283,34 +283,64 @@ function getMonthNumber(monthName: string): string {
 
 // Parse Finnish ALV breakdown table (ALV% / Veroton / Vero / Verollinen)
 function parseAlvBreakdown(text: string): { vatRate: number; grossAmount: number }[] {
-  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
   console.log('🔍 parseAlvBreakdown — full text:\n', text);
+
+  // Primary: split by newlines; fallback to 2+ spaces when OCR returns a flat string
+  const byNewline = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  const workingLines = byNewline.length >= 5
+    ? byNewline
+    : text.split(/\s{2,}/).map(l => l.trim()).filter(l => l.length > 0);
+
   let headerIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
-    const lower = lines[i].toLowerCase();
+  for (let i = 0; i < workingLines.length; i++) {
+    const lower = workingLines[i].toLowerCase();
     if ((lower.includes('alv') || lower.includes('moms')) &&
         (lower.includes('verollinen') || lower.includes('yhteensä') || lower.includes('veroll') || lower.includes('summa'))) {
       headerIdx = i;
       break;
     }
   }
-  console.log('🔍 parseAlvBreakdown — headerIdx:', headerIdx);
+  console.log('🔍 parseAlvBreakdown — headerIdx:', headerIdx, '(line count:', workingLines.length, ')');
   if (headerIdx !== -1) {
     const start = Math.max(0, headerIdx - 5);
-    const end = Math.min(lines.length, headerIdx + 6);
-    console.log('🔍 parseAlvBreakdown — lines around header:', JSON.stringify(lines.slice(start, end)));
+    const end = Math.min(workingLines.length, headerIdx + 6);
+    console.log('🔍 parseAlvBreakdown — lines around header:', JSON.stringify(workingLines.slice(start, end)));
   }
-  if (headerIdx === -1) return [];
-  const results: { vatRate: number; grossAmount: number }[] = [];
-  for (let i = headerIdx + 1; i < lines.length && i < headerIdx + 8; i++) {
-    const nums = lines[i].match(/\d+[,.]\d+/g);
-    if (!nums || nums.length < 2) break;
-    const vatRate = parseFloat(nums[0].replace(',', '.'));
-    const gross = parseFloat(nums[nums.length - 1].replace(',', '.'));
-    if (isNaN(vatRate) || isNaN(gross) || vatRate < 0 || vatRate > 100 || gross <= 0) break;
-    results.push({ vatRate, grossAmount: gross });
+
+  // Line-based parse
+  if (headerIdx !== -1) {
+    const results: { vatRate: number; grossAmount: number }[] = [];
+    for (let i = headerIdx + 1; i < workingLines.length && i < headerIdx + 8; i++) {
+      const nums = workingLines[i].match(/\d+[,.]\d+/g);
+      if (!nums || nums.length < 2) break;
+      const vatRate = parseFloat(nums[0].replace(',', '.'));
+      const gross = parseFloat(nums[nums.length - 1].replace(',', '.'));
+      if (isNaN(vatRate) || isNaN(gross) || vatRate < 0 || vatRate > 100 || gross <= 0) break;
+      results.push({ vatRate, grossAmount: gross });
+    }
+    if (results.length >= 2) return results;
   }
-  return results.length >= 2 ? results : [];
+
+  // Flat-string fallback: find ALV keyword then regex-match 4-number rows
+  const alvMatch = text.toLowerCase().match(/alv|moms/);
+  if (alvMatch && alvMatch.index !== undefined) {
+    const afterHeader = text.substring(alvMatch.index);
+    const rowPattern = /(\d+[,.]?\d*)\s+\d+[,.]?\d+\s+\d+[,.]?\d+\s+(\d+[,.]?\d+)/g;
+    const results: { vatRate: number; grossAmount: number }[] = [];
+    let match;
+    while ((match = rowPattern.exec(afterHeader)) !== null) {
+      const vatRate = parseFloat(match[1].replace(',', '.'));
+      const gross = parseFloat(match[2].replace(',', '.'));
+      if (!isNaN(vatRate) && !isNaN(gross) && vatRate >= 0 && vatRate <= 100 && gross > 0) {
+        results.push({ vatRate, grossAmount: gross });
+      }
+      if (results.length >= 5) break;
+    }
+    console.log('🔍 parseAlvBreakdown — flat regex result:', JSON.stringify(results));
+    if (results.length >= 2) return results;
+  }
+
+  return [];
 }
 
 // JSON response helper
