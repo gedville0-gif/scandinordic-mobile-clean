@@ -284,6 +284,7 @@ function getMonthNumber(monthName: string): string {
 // Parse Finnish ALV breakdown table (ALV% / Veroton / Vero / Verollinen)
 function parseAlvBreakdown(text: string): { vatRate: number; grossAmount: number }[] {
   const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  console.log('🔍 parseAlvBreakdown — full text:\n', text);
   let headerIdx = -1;
   for (let i = 0; i < lines.length; i++) {
     const lower = lines[i].toLowerCase();
@@ -292,6 +293,12 @@ function parseAlvBreakdown(text: string): { vatRate: number; grossAmount: number
       headerIdx = i;
       break;
     }
+  }
+  console.log('🔍 parseAlvBreakdown — headerIdx:', headerIdx);
+  if (headerIdx !== -1) {
+    const start = Math.max(0, headerIdx - 5);
+    const end = Math.min(lines.length, headerIdx + 6);
+    console.log('🔍 parseAlvBreakdown — lines around header:', JSON.stringify(lines.slice(start, end)));
   }
   if (headerIdx === -1) return [];
   const results: { vatRate: number; grossAmount: number }[] = [];
