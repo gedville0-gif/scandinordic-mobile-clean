@@ -149,11 +149,16 @@ serve(async (req: Request) => {
     const transactions = parseTransactions(fullText);
     console.log(`💰 Parsed ${transactions.length} transactions`);
 
+    // Parse Finnish ALV breakdown table
+    const vatBreakdown = parseAlvBreakdown(fullText);
+    console.log(`💶 ALV breakdown: ${vatBreakdown.length} rows`, JSON.stringify(vatBreakdown));
+
     // Return success response
     return json({
       success: true,
       transactions,
       rawText: fullText,
+      vatBreakdown,
       debug_text_length: fullText.length,
       debug_first_500: fullText.substring(0, 500)
     });
@@ -274,6 +279,31 @@ function getMonthNumber(monthName: string): string {
     'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12'
   };
   return months[monthName.toLowerCase()] || '01';
+}
+
+// Parse Finnish ALV breakdown table (ALV% / Veroton / Vero / Verollinen)
+function parseAlvBreakdown(text: string): { vatRate: number; grossAmount: number }[] {
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  let headerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const lower = lines[i].toLowerCase();
+    if ((lower.includes('alv') || lower.includes('moms')) &&
+        (lower.includes('verollinen') || lower.includes('yhteensä') || lower.includes('veroll') || lower.includes('summa'))) {
+      headerIdx = i;
+      break;
+    }
+  }
+  if (headerIdx === -1) return [];
+  const results: { vatRate: number; grossAmount: number }[] = [];
+  for (let i = headerIdx + 1; i < lines.length && i < headerIdx + 8; i++) {
+    const nums = lines[i].match(/\d+[,.]\d+/g);
+    if (!nums || nums.length < 2) break;
+    const vatRate = parseFloat(nums[0].replace(',', '.'));
+    const gross = parseFloat(nums[nums.length - 1].replace(',', '.'));
+    if (isNaN(vatRate) || isNaN(gross) || vatRate < 0 || vatRate > 100 || gross <= 0) break;
+    results.push({ vatRate, grossAmount: gross });
+  }
+  return results.length >= 2 ? results : [];
 }
 
 // JSON response helper

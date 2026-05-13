@@ -976,16 +976,12 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
       const amount = extractAmount(fullText);
       const date = extractDate(fullText);
 
-      console.log('🔍 extractAlvBreakdown input (first 500 chars):', fullText.substring(0, 500));
-      const vatBreakdown = extractAlvBreakdown(fullText);
-      console.log('🔍 extractAlvBreakdown result:', JSON.stringify(vatBreakdown));
-
       return {
         merchant,
         amount,
         date,
         confidence: 0.8,
-        vatBreakdown,
+        vatBreakdown: visionResult.vatBreakdown ?? [],
       };
     })()
       .then((result: any) => {
