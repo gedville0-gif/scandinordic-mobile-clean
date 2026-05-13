@@ -113,7 +113,9 @@ export function TransactionItem({ item, currency, onPress, onLongPress, onDelete
         <Text style={[styles.amount, { color }]}>
           {isIncome ? '+' : '-'}{formatCurrency(item.amount, currency)}
         </Text>
-        {item.vatRate ? (
+        {item.vatRows && item.vatRows.length >= 2 ? (
+          <Text style={styles.vat}>Mixed VAT</Text>
+        ) : item.vatRate ? (
           <Text style={styles.vat}>VAT {item.vatRate}%</Text>
         ) : null}
       </View>

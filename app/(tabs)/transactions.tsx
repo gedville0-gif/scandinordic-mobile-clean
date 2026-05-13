@@ -1055,7 +1055,10 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
       }
     }
 
-    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, veroCategory: getVeroCategory(category, 'expense'), date: dateStr, vatRate: vp, note: note || undefined, receipt_url });
+    const savedVatRows = vatRows.length >= 2
+      ? vatRows.map(r => ({ vatRate: r.vatPct, grossAmount: parseFloat(r.rowAmt.replace(',', '.')) || 0 }))
+      : undefined;
+    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, veroCategory: getVeroCategory(category, 'expense'), date: dateStr, vatRate: vp, vatRows: savedVatRows, note: note || undefined, receipt_url });
     onClose();
   };
 
@@ -2601,21 +2604,32 @@ function TransactionEditModal({ tx, onClose, onSave, currency }: {
           </View>
           <View>
             <Text style={{ fontSize: 10, fontWeight: '700', color: COLORS.primary, textTransform: 'uppercase', letterSpacing: 1.2, marginBottom: 10 }}>VAT Rate</Text>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              {VAT_PRESETS.map(pct => (
-                <Pressable
-                  key={pct}
-                  onPress={() => setVatRate(pct)}
-                  style={{
-                    flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 12, borderWidth: 1,
-                    backgroundColor: vatRate === pct ? COLORS.primary : COLORS.surface,
-                    borderColor: vatRate === pct ? COLORS.primary : COLORS.border,
-                  }}
-                >
-                  <Text style={{ fontSize: 13, fontWeight: '700', color: vatRate === pct ? COLORS.background : COLORS.muted }}>{pct}%</Text>
-                </Pressable>
-              ))}
-            </View>
+            {tx.vatRows && tx.vatRows.length >= 2 ? (
+              <View style={{ gap: 6 }}>
+                {tx.vatRows.map((row, i) => (
+                  <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 }}>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: COLORS.text }}>{formatCurrency(row.grossAmount, currency)}</Text>
+                    <Text style={{ fontSize: 12, color: COLORS.muted }}>× {row.vatRate}%</Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                {VAT_PRESETS.map(pct => (
+                  <Pressable
+                    key={pct}
+                    onPress={() => setVatRate(pct)}
+                    style={{
+                      flex: 1, alignItems: 'center', paddingVertical: 10, borderRadius: 12, borderWidth: 1,
+                      backgroundColor: vatRate === pct ? COLORS.primary : COLORS.surface,
+                      borderColor: vatRate === pct ? COLORS.primary : COLORS.border,
+                    }}
+                  >
+                    <Text style={{ fontSize: 13, fontWeight: '700', color: vatRate === pct ? COLORS.background : COLORS.muted }}>{pct}%</Text>
+                  </Pressable>
+                ))}
+              </View>
+            )}
           </View>
         </ScrollView>
         <View style={{ paddingHorizontal: 20, paddingTop: 12 }}>

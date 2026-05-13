@@ -9,6 +9,7 @@ export interface Transaction {
   veroCategory?: string;
   date: string;
   vatRate?: number;
+  vatRows?: { vatRate: number; grossAmount: number }[];
   notes?: string;
   clientName?: string;
   status?: 'paid' | 'unpaid';
