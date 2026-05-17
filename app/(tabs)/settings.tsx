@@ -15,11 +15,19 @@ import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { getSettings, saveSettings } from '@/lib/storage';
+import { supabase } from '@/lib/supabase';
 import type { Language, Currency, Settings } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAppDialog } from '@/components/AppDialog';
+
+// Dynamic imports — same pattern as other screens. Allow graceful degradation
+// on environments where these native modules aren't available.
+let FileSystem: any = null;
+let Sharing: any = null;
+try { FileSystem = require('expo-file-system/legacy'); } catch {}
+try { Sharing = require('expo-sharing'); } catch {}
 
 const LANGUAGES: { code: Language; label: string; flag: string }[] = [
   { code: 'en', label: 'English', flag: '🇬🇧' },
@@ -50,6 +58,8 @@ export default function SettingsScreen() {
   const [companyOpen, setCompanyOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(true);
   const [signingOut, setSigningOut] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [deletingAccount, setDeletingAccount] = useState(false);
   const [langOpen, setLangOpen] = useState(false);
   const [curOpen, setCurOpen] = useState(false);
 
@@ -90,6 +100,70 @@ export default function SettingsScreen() {
       } finally {
         setSigningOut(false);
       }
+    }
+  };
+
+  // GDPR Article 20 — Right to Data Portability.
+  const handleExportData = async () => {
+    setExporting(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('export-data');
+      if (error) throw error;
+      if (!data) throw new Error('Empty response from export-data');
+
+      const json = JSON.stringify(data, null, 2);
+      const filename = `scandinordic-export-${new Date().toISOString().split('T')[0]}.json`;
+
+      if (FileSystem && Sharing) {
+        const uri = `${FileSystem.cacheDirectory}${filename}`;
+        await FileSystem.writeAsStringAsync(uri, json);
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, { mimeType: 'application/json', dialogTitle: t('exportMyData') });
+        } else {
+          await showDialog(t('exportMyData'), `Saved: ${filename}`, [{ text: 'OK' }]);
+        }
+      } else {
+        await showDialog(t('exportError'), 'File sharing unavailable on this device.', [{ text: 'OK' }]);
+      }
+    } catch (e: any) {
+      await showDialog(t('exportError'), e?.message ?? 'Unknown error', [{ text: 'OK' }]);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // GDPR Article 17 — Right to Erasure. Two-step confirmation to prevent fat-fingering.
+  const handleDeleteAccount = async () => {
+    const idx1 = await showDialog(
+      t('deleteAccount'),
+      t('deleteAccountConfirm1'),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        { text: t('deleteAccountContinue'), style: 'destructive' },
+      ],
+    );
+    if (idx1 !== 1) return;
+
+    const idx2 = await showDialog(
+      t('deleteAccount'),
+      t('deleteAccountConfirm2'),
+      [
+        { text: t('cancel'), style: 'cancel' },
+        { text: t('deleteAccountConfirmFinal'), style: 'destructive' },
+      ],
+    );
+    if (idx2 !== 1) return;
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    setDeletingAccount(true);
+    try {
+      const { error } = await supabase.functions.invoke('delete-account');
+      if (error) throw error;
+      // JWT is now invalid; clear local session and redirect to login.
+      await signOut();
+    } catch (e: any) {
+      setDeletingAccount(false);
+      await showDialog(t('deleteAccountError'), e?.message ?? 'Unknown error', [{ text: 'OK' }]);
     }
   };
 
@@ -333,12 +407,42 @@ export default function SettingsScreen() {
       {/* Account */}
       {user?.email ? (
         <View style={styles.card}>
-          <View style={[styles.cardHeader, { borderBottomWidth: 0 }]}>
+          <View style={[styles.cardHeader, { borderBottomWidth: 1, borderBottomColor: COLORS.border }]}>
             <View>
               <Text style={styles.sectionLabel}>{t('account')}</Text>
               <Text style={styles.sectionSub}>{user.email}</Text>
             </View>
           </View>
+
+          {/* GDPR Art. 20 — Export My Data */}
+          <Pressable
+            style={({ pressed }) => [styles.row, pressed && { backgroundColor: COLORS.surface }]}
+            onPress={handleExportData}
+            disabled={exporting}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={styles.rowLabel}>{t('exportMyData')}</Text>
+              <Text style={[styles.rowValue, { marginTop: 2 }]}>{t('exportDataDesc')}</Text>
+            </View>
+            {exporting
+              ? <ActivityIndicator size="small" color={COLORS.primary} />
+              : <Text style={styles.legalArrow}>→</Text>}
+          </Pressable>
+
+          {/* GDPR Art. 17 — Delete Account */}
+          <Pressable
+            style={({ pressed }) => [styles.row, { borderBottomColor: 'transparent' }, pressed && { backgroundColor: COLORS.surface }]}
+            onPress={handleDeleteAccount}
+            disabled={deletingAccount}
+          >
+            <View style={{ flex: 1, paddingRight: 12 }}>
+              <Text style={[styles.rowLabel, { color: COLORS.danger }]}>{t('deleteAccount')}</Text>
+              <Text style={[styles.rowValue, { marginTop: 2 }]}>{t('deleteAccountDesc')}</Text>
+            </View>
+            {deletingAccount
+              ? <ActivityIndicator size="small" color={COLORS.danger} />
+              : <Text style={[styles.legalArrow, { color: COLORS.danger }]}>→</Text>}
+          </Pressable>
         </View>
       ) : null}
 
