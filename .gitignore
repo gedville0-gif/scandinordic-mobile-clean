@@ -39,3 +39,20 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# sensitive test fixtures (real bank statements / PII)
+__tests__/fixtures/bank_statements_*.pdf
+pdf_base64.txt
+
+# one-off debug scripts
+test_google_vision.js
+test_pdf_parser.js
+test_pdf_parser_debug.js
+test_vision_curl.sh
+
+# local Claude Code state
+.claude/settings.local.json
+.claude/session-log.md
+
+# Supabase CLI temp
+supabase/.temp/
