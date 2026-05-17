@@ -7,7 +7,7 @@ import { Feather } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { getTransactions, getSettings } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, subtractCents, multiplyCents, zeroCents, computeVatFromGross } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
 
@@ -51,7 +51,10 @@ export default function VATScreen() {
   }, [transactions, period]);
 
   const vatCollected = useMemo(
-    () => filtered.filter(tx => tx.type === 'income' && tx.vatRate != null).reduce((s, tx) => s + tx.amount * (tx.vatRate ?? 0) / 100, 0),
+    () => filtered.filter(tx => tx.type === 'income' && tx.vatRate != null).reduce(
+      (s, tx) => addCents(s, multiplyCents(tx.amountCents, (tx.vatRate ?? 0) / 100)),
+      zeroCents(),
+    ),
     [filtered],
   );
   const vatPaid = useMemo(
@@ -59,31 +62,34 @@ export default function VATScreen() {
       .filter(tx => tx.type === 'expense' && (tx.vatRate != null || (tx.vatRows && tx.vatRows.length > 0)))
       .reduce((s, tx) => {
         if (tx.vatRows && tx.vatRows.length >= 2) {
-          return s + tx.vatRows.reduce((rowSum, row) => rowSum + row.grossAmount - row.grossAmount / (1 + row.vatRate / 100), 0);
+          return addCents(s, tx.vatRows.reduce(
+            (rowSum, row) => addCents(rowSum, computeVatFromGross(row.grossAmountCents, row.vatRate).vat),
+            zeroCents(),
+          ));
         }
-        return s + tx.amount * (tx.vatRate ?? 0) / 100;
-      }, 0),
+        return addCents(s, multiplyCents(tx.amountCents, (tx.vatRate ?? 0) / 100));
+      }, zeroCents()),
     [filtered],
   );
-  const vatPayable = vatCollected - vatPaid;
+  const vatPayable = subtractCents(vatCollected, vatPaid);
 
   // Breakdown by VAT rate
   const rateBreakdown = useMemo(() => {
     const rates = [0, 10, 13.5, 25.5];
     return rates.map(rate => {
       const collected = filtered.filter(tx => tx.type === 'income' && (tx.vatRate || 0) === rate)
-        .reduce((s, tx) => s + tx.amount * rate / 100, 0);
+        .reduce((s, tx) => addCents(s, multiplyCents(tx.amountCents, rate / 100)), zeroCents());
       const paid = filtered.filter(tx => tx.type === 'expense')
         .reduce((s, tx) => {
           if (tx.vatRows && tx.vatRows.length >= 2) {
             const row = tx.vatRows.find(r => r.vatRate === rate);
             if (!row) return s;
-            return s + row.grossAmount - row.grossAmount / (1 + rate / 100);
+            return addCents(s, computeVatFromGross(row.grossAmountCents, rate).vat);
           }
           if ((tx.vatRate || 0) !== rate) return s;
-          return s + tx.amount * rate / 100;
-        }, 0);
-      return { rate, collected, paid, net: collected - paid };
+          return addCents(s, multiplyCents(tx.amountCents, rate / 100));
+        }, zeroCents());
+      return { rate, collected, paid, net: subtractCents(collected, paid) };
     }).filter(r => r.collected > 0 || r.paid > 0);
   }, [filtered]);
 
@@ -177,16 +183,16 @@ export default function VATScreen() {
       <View style={styles.triRow}>
         <View style={styles.triCard}>
           <Text style={styles.triLabel}>{t('vatCollected')}</Text>
-          <Text style={[styles.triValue, { color: COLORS.success }]}>{formatCurrency(vatCollected, currency)}</Text>
+          <Text style={[styles.triValue, { color: COLORS.success }]}>{formatCents(vatCollected, currency)}</Text>
         </View>
         <View style={styles.triCard}>
           <Text style={styles.triLabel}>{t('vatPaid')}</Text>
-          <Text style={[styles.triValue, { color: COLORS.danger }]}>{formatCurrency(vatPaid, currency)}</Text>
+          <Text style={[styles.triValue, { color: COLORS.danger }]}>{formatCents(vatPaid, currency)}</Text>
         </View>
         <View style={[styles.triCard, styles.triCardHighlight]}>
           <Text style={styles.triLabel}>{t('vatPayable')}</Text>
           <Text style={[styles.triValue, { color: vatPayable >= 0 ? COLORS.text : COLORS.success }]}>
-            {formatCurrency(vatPayable, currency)}
+            {formatCents(vatPayable, currency)}
           </Text>
         </View>
       </View>
@@ -205,13 +211,13 @@ export default function VATScreen() {
             <View key={r.rate} style={styles.rateRow}>
               <Text style={[styles.rateVal, { flex: 0.8, fontWeight: '700' }]}>{r.rate}%</Text>
               <Text style={[styles.rateVal, { color: COLORS.success, textAlign: 'right' }]}>
-                {formatCurrency(r.collected, currency)}
+                {formatCents(r.collected, currency)}
               </Text>
               <Text style={[styles.rateVal, { color: COLORS.danger, textAlign: 'right' }]}>
-                {formatCurrency(r.paid, currency)}
+                {formatCents(r.paid, currency)}
               </Text>
               <Text style={[styles.rateVal, { fontWeight: '700', textAlign: 'right' }]}>
-                {formatCurrency(r.net, currency)}
+                {formatCents(r.net, currency)}
               </Text>
             </View>
           ))}
@@ -226,8 +232,11 @@ export default function VATScreen() {
             const isIncome = tx.type === 'income';
             const color = isIncome ? COLORS.success : COLORS.danger;
             const vatAmt = tx.vatRows && tx.vatRows.length >= 2
-              ? tx.vatRows.reduce((s, row) => s + row.grossAmount - row.grossAmount / (1 + row.vatRate / 100), 0)
-              : tx.amount * (tx.vatRate || 0) / 100;
+              ? tx.vatRows.reduce(
+                  (s, row) => addCents(s, computeVatFromGross(row.grossAmountCents, row.vatRate).vat),
+                  zeroCents(),
+                )
+              : multiplyCents(tx.amountCents, (tx.vatRate || 0) / 100);
             const date = new Date(tx.date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' });
             return (
               <View key={tx.id} style={styles.txRow}>
@@ -240,7 +249,7 @@ export default function VATScreen() {
                 </View>
                 <View style={styles.txRight}>
                   <Text style={[styles.txVat, { color }]}>
-                    {isIncome ? '+' : ''}{formatCurrency(vatAmt, currency)}
+                    {isIncome ? '+' : ''}{formatCents(vatAmt, currency)}
                   </Text>
                   <Text style={[styles.txType, { color: color + 'aa' }]}>
                     {isIncome ? 'Collected' : 'Paid'}

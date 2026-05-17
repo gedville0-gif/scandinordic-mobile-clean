@@ -3,7 +3,7 @@ import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/constants/colors';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents } from '@/lib/money';
 import { useLanguage } from '@/contexts/LanguageContext';
 import type { Invoice, Currency } from '@/lib/types';
 
@@ -156,7 +156,7 @@ export function InvoiceCard({ invoice, currency, onPress, onPdfPress, onDownload
         </View>
         <View style={styles.amounts}>
           <Text style={styles.metaLabel}>{t('totalInclVat')}</Text>
-          <Text style={styles.totalAmount}>{formatCurrency(invoice.totalAmount, currency)}</Text>
+          <Text style={styles.totalAmount}>{formatCents(invoice.totalAmountCents, currency)}</Text>
         </View>
         <View style={styles.actionBtns}>
           {onPdfPress && (

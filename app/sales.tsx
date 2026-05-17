@@ -5,7 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { getTransactions, getSettings } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, zeroCents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import DatePickerModal from '@/components/DatePickerModal';
 
@@ -37,7 +37,7 @@ export default function SalesScreen() {
     const prefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
     return transactions
       .filter(tx => tx.type === 'income' && tx.date.startsWith(prefix))
-      .reduce((s, tx) => s + tx.amount, 0);
+      .reduce((s, tx) => addCents(s, tx.amountCents), zeroCents());
   }, [transactions]);
 
   const sales = useMemo(() =>
@@ -47,7 +47,7 @@ export default function SalesScreen() {
     [transactions, startDate, endDate],
   );
 
-  const filteredTotal = useMemo(() => sales.reduce((s, tx) => s + tx.amount, 0), [sales]);
+  const filteredTotal = useMemo(() => sales.reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()), [sales]);
 
   return (
     <>
@@ -71,7 +71,7 @@ export default function SalesScreen() {
         {/* This month hero */}
         <View style={styles.heroCard}>
           <Text style={styles.heroLabel}>SALES THIS MONTH</Text>
-          <Text style={styles.heroValue}>{formatCurrency(thisMonthTotal, currency)}</Text>
+          <Text style={styles.heroValue}>{formatCents(thisMonthTotal, currency)}</Text>
           <Text style={styles.heroSub}>
             {transactions.filter(tx => {
               const prefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -105,7 +105,7 @@ export default function SalesScreen() {
         {/* Filtered summary row */}
         <View style={styles.summaryBar}>
           <Text style={styles.summaryCount}>{sales.length} sale{sales.length !== 1 ? 's' : ''}</Text>
-          <Text style={styles.summaryTotal}>{formatCurrency(filteredTotal, currency)}</Text>
+          <Text style={styles.summaryTotal}>{formatCents(filteredTotal, currency)}</Text>
         </View>
 
         {/* Sales list */}
@@ -129,7 +129,7 @@ export default function SalesScreen() {
                       {tx.category}{tx.vatRate ? ` · VAT ${tx.vatRate}%` : ''} · {date}
                     </Text>
                   </View>
-                  <Text style={styles.txAmount}>{formatCurrency(tx.amount, currency)}</Text>
+                  <Text style={styles.txAmount}>{formatCents(tx.amountCents, currency)}</Text>
                 </View>
               );
             })}

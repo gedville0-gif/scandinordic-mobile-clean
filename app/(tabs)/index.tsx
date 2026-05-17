@@ -8,7 +8,7 @@ import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { BarChart, ChartLegend } from '@/components/BarChart';
 import { getTransactions, getSettings } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, subtractCents, multiplyCents, zeroCents, type Cents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
 
@@ -50,31 +50,37 @@ export default function DashboardScreen() {
   }, [transactions, period]);
 
   const income = useMemo(
-    () => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount, 0),
+    () => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
     [filtered],
   );
   const expense = useMemo(
-    () => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount, 0),
+    () => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
     [filtered],
   );
-  const profit = income - expense;
+  const profit = subtractCents(income, expense);
 
   const vatCollected = useMemo(
-    () => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount * (tx.vatRate || 0) / 100, 0),
+    () => filtered.filter(tx => tx.type === 'income').reduce(
+      (s, tx) => addCents(s, multiplyCents(tx.amountCents, (tx.vatRate || 0) / 100)),
+      zeroCents(),
+    ),
     [filtered],
   );
   const vatPaid = useMemo(
-    () => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount * (tx.vatRate || 0) / 100, 0),
+    () => filtered.filter(tx => tx.type === 'expense').reduce(
+      (s, tx) => addCents(s, multiplyCents(tx.amountCents, (tx.vatRate || 0) / 100)),
+      zeroCents(),
+    ),
     [filtered],
   );
-  const netVat = vatCollected - vatPaid;
+  const netVat = subtractCents(vatCollected, vatPaid);
 
   const todayIncome = useMemo(
-    () => transactions.filter(tx => tx.type === 'income' && tx.date.startsWith(todayStr)).reduce((s, tx) => s + tx.amount, 0),
+    () => transactions.filter(tx => tx.type === 'income' && tx.date.startsWith(todayStr)).reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
     [transactions, todayStr],
   );
   const todayExpense = useMemo(
-    () => transactions.filter(tx => tx.type === 'expense' && tx.date.startsWith(todayStr)).reduce((s, tx) => s + tx.amount, 0),
+    () => transactions.filter(tx => tx.type === 'expense' && tx.date.startsWith(todayStr)).reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
     [transactions, todayStr],
   );
 
@@ -87,8 +93,8 @@ export default function DashboardScreen() {
       });
       return {
         label: d.toLocaleString('default', { month: 'short' }),
-        income: monthTx.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount, 0),
-        expense: monthTx.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount, 0),
+        income: monthTx.filter(tx => tx.type === 'income').reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
+        expense: monthTx.filter(tx => tx.type === 'expense').reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
       };
     }),
     [transactions],
@@ -108,8 +114,8 @@ export default function DashboardScreen() {
   ];
 
   const stats = [
-    { label: t('totalIncome'),   value: formatCurrency(income, currency),  color: COLORS.success, emoji: '📈', href: '/(tabs)/transactions' },
-    { label: t('totalExpenses'), value: formatCurrency(expense, currency), color: COLORS.danger,  emoji: '📉', href: '/(tabs)/transactions' },
+    { label: t('totalIncome'),   value: formatCents(income, currency),  color: COLORS.success, emoji: '📈', href: '/(tabs)/transactions' },
+    { label: t('totalExpenses'), value: formatCents(expense, currency), color: COLORS.danger,  emoji: '📉', href: '/(tabs)/transactions' },
   ];
 
   const actions = [
@@ -152,19 +158,19 @@ export default function DashboardScreen() {
       <View style={styles.heroCard}>
         <Text style={styles.heroLabel}>{t('netProfit')}</Text>
         <Text style={[styles.heroValue, { color: profit >= 0 ? COLORS.success : COLORS.danger }]}>
-          {formatCurrency(profit, currency)}
+          {formatCents(profit, currency)}
         </Text>
         <View style={styles.todayRow}>
           <View style={styles.todayBadgeGreen}>
             <View style={[styles.todayDot, { backgroundColor: COLORS.success }]} />
             <Text style={[styles.todayText, { color: COLORS.success }]}>
-              {t('todayIn')}: {formatCurrency(todayIncome, currency)}
+              {t('todayIn')}: {formatCents(todayIncome, currency)}
             </Text>
           </View>
           <View style={styles.todayBadgeRed}>
             <View style={[styles.todayDot, { backgroundColor: COLORS.danger }]} />
             <Text style={[styles.todayText, { color: COLORS.danger }]}>
-              {t('todayOut')}: {formatCurrency(todayExpense, currency)}
+              {t('todayOut')}: {formatCents(todayExpense, currency)}
             </Text>
           </View>
         </View>
@@ -232,7 +238,7 @@ export default function DashboardScreen() {
                   <Text style={styles.txMeta}>{tx.category} · {date}</Text>
                 </View>
                 <Text style={[styles.txAmount, { color }]}>
-                  {isIncome ? '+' : '-'}{formatCurrency(tx.amount, currency)}
+                  {isIncome ? '+' : '-'}{formatCents(tx.amountCents, currency)}
                 </Text>
               </View>
             );

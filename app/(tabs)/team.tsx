@@ -24,6 +24,7 @@ import {
 } from '@/lib/storage';
 import { businessCategories, getCategoryLabel } from '@/lib/categories';
 import { formatCurrency } from '@/lib/currency';
+import { formatCents, multiplyCents, toCents, type Cents } from '@/lib/money';
 import type { Worker, WorkSession, Currency } from '@/lib/types';
 import { supabase } from '@/lib/supabase';
 
@@ -198,7 +199,7 @@ export default function TeamScreen() {
   const workerStats = useMemo(() => workers.map(w => {
     const monthSessions = sessions.filter(s => s.workerId === w.id && new Date(s.date) >= monthStart && s.durationHours != null);
     const monthHours = monthSessions.reduce((sum, s) => sum + (s.durationHours ?? 0), 0);
-    return { ...w, monthHours, estSalary: monthHours * w.hourlyRate };
+    return { ...w, monthHours, estSalary: multiplyCents(w.hourlyRateCents, monthHours) };
   }), [workers, sessions]);
 
   const recentSessions = useMemo(() =>
@@ -243,7 +244,7 @@ export default function TeamScreen() {
       id: Date.now().toString(),
       name: workerName.trim(),
       categoryId: workerCategory,
-      hourlyRate: parseFloat(workerRate),
+      hourlyRateCents: toCents(parseFloat(workerRate)),
       createdAt: new Date().toISOString(),
     });
     setWorkerName(''); setWorkerRate(''); setWorkerCategory('');
@@ -579,11 +580,11 @@ export default function TeamScreen() {
                   </View>
                   <View style={styles.workerStat}>
                     <Text style={styles.workerStatLabel}>{t('estimatedSalary')}</Text>
-                    <Text style={[styles.workerStatValue, { color: COLORS.success }]}>{formatCurrency(w.estSalary, currency)}</Text>
+                    <Text style={[styles.workerStatValue, { color: COLORS.success }]}>{formatCents(w.estSalary, currency)}</Text>
                   </View>
                   <View style={styles.workerStat}>
                     <Text style={styles.workerStatLabel}>{t('hourlyRate')}</Text>
-                    <Text style={styles.workerStatValue}>{formatCurrency(w.hourlyRate, currency)}/h</Text>
+                    <Text style={styles.workerStatValue}>{formatCents(w.hourlyRateCents, currency)}/h</Text>
                   </View>
                 </View>
               </View>

@@ -3,7 +3,7 @@ import { View, Text, Pressable, StyleSheet, TouchableOpacity } from 'react-nativ
 import { Feather } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/constants/colors';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import { INCOME_CATEGORIES, EXPENSE_CATEGORIES } from '@/constants/categories';
 
@@ -111,7 +111,7 @@ export function TransactionItem({ item, currency, onPress, onLongPress, onDelete
       </View>
       <View style={styles.right}>
         <Text style={[styles.amount, { color }]}>
-          {isIncome ? '+' : '-'}{formatCurrency(item.amount, currency)}
+          {isIncome ? '+' : '-'}{formatCents(item.amountCents, currency)}
         </Text>
         {item.vatRows && item.vatRows.length >= 2 ? (
           <Text style={styles.vat}>Mixed VAT</Text>

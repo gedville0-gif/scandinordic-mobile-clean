@@ -5,7 +5,7 @@ import { Feather } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { getTransactions, getSettings } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, formatCentsPlain, addCents, multiplyCents, zeroCents, type Cents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 
 let Print: any = null;
@@ -45,7 +45,7 @@ export default function SalesReportScreen() {
       const monthSales = transactions.filter(tx => tx.type === 'income' && tx.date.startsWith(prefix));
       return {
         label: `${MONTHS[d.getMonth()]} ${d.getFullYear()}`,
-        total: monthSales.reduce((s, tx) => s + tx.amount, 0),
+        total: monthSales.reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
         count: monthSales.length,
       };
     }),
@@ -58,7 +58,7 @@ export default function SalesReportScreen() {
     [transactions, currentMonthPrefix],
   );
   const currentMonthTotal = useMemo(
-    () => currentMonthSales.reduce((s, tx) => s + tx.amount, 0),
+    () => currentMonthSales.reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()),
     [currentMonthSales],
   );
 
@@ -66,22 +66,22 @@ export default function SalesReportScreen() {
   const vatBreakdown = useMemo(() =>
     VAT_RATES.map(rate => {
       const items = currentMonthSales.filter(tx => (tx.vatRate ?? 0) === rate);
-      const net = items.reduce((s, tx) => s + tx.amount, 0);
-      const vat = net * rate / 100;
+      const net = items.reduce((s, tx) => addCents(s, tx.amountCents), zeroCents());
+      const vat = multiplyCents(net, rate / 100);
       return { rate, net, vat, count: items.length };
     }).filter(v => v.count > 0),
     [currentMonthSales],
   );
 
-  const totalVat = useMemo(() => vatBreakdown.reduce((s, v) => s + v.vat, 0), [vatBreakdown]);
+  const totalVat = useMemo(() => vatBreakdown.reduce((s, v) => addCents(s, v.vat), zeroCents()), [vatBreakdown]);
 
   // Top selling items (by description, sorted by total)
   const topItems = useMemo(() => {
-    const map: Record<string, { total: number; count: number }> = {};
+    const map: Record<string, { total: Cents; count: number }> = {};
     currentMonthSales.forEach(tx => {
       const key = tx.description || tx.category || 'Other';
-      if (!map[key]) map[key] = { total: 0, count: 0 };
-      map[key].total += tx.amount;
+      if (!map[key]) map[key] = { total: zeroCents(), count: 0 };
+      map[key].total = addCents(map[key].total, tx.amountCents);
       map[key].count += 1;
     });
     return Object.entries(map)
@@ -99,14 +99,14 @@ export default function SalesReportScreen() {
     try {
       const monthLabel = `${MONTHS[now.getMonth()]} ${now.getFullYear()}`;
       const cur = currency === 'EUR' ? '€' : currency === 'SEK' ? 'kr' : currency === 'DKK' ? 'kr' : currency === 'NOK' ? 'kr' : currency;
-      const fmt = (v: number) => `${cur}${v.toFixed(2)}`;
+      const fmt = (v: Cents) => `${cur}${formatCentsPlain(v)}`;
 
       const vatRows = VAT_RATES.map(rate => {
         const items = currentMonthSales.filter(tx => (tx.vatRate ?? 0) === rate);
         if (items.length === 0) return '';
-        const net = items.reduce((s, tx) => s + tx.amount, 0);
-        const vat = net * rate / 100;
-        return `<tr><td>${rate}%</td><td class="r">${items.length}</td><td class="r">${fmt(net)}</td><td class="r">${fmt(vat)}</td><td class="r">${fmt(net + vat)}</td></tr>`;
+        const net = items.reduce((s, tx) => addCents(s, tx.amountCents), zeroCents());
+        const vat = multiplyCents(net, rate / 100);
+        return `<tr><td>${rate}%</td><td class="r">${items.length}</td><td class="r">${fmt(net)}</td><td class="r">${fmt(vat)}</td><td class="r">${fmt(addCents(net, vat))}</td></tr>`;
       }).join('');
 
       const topRows = topItems.map(item =>
@@ -224,7 +224,7 @@ td.bold { font-weight: 700; color: #16161e; }
       {/* Monthly hero */}
       <View style={styles.heroCard}>
         <Text style={styles.heroLabel}>TOTAL SALES — {MONTHS[now.getMonth()].toUpperCase()} {now.getFullYear()}</Text>
-        <Text style={styles.heroValue}>{formatCurrency(currentMonthTotal, currency)}</Text>
+        <Text style={styles.heroValue}>{formatCents(currentMonthTotal, currency)}</Text>
         <Text style={styles.heroSub}>{currentMonthSales.length} transaction{currentMonthSales.length !== 1 ? 's' : ''}</Text>
       </View>
 
@@ -241,17 +241,17 @@ td.bold { font-weight: 700; color: #16161e; }
                   <View style={styles.vatBadge}>
                     <Text style={styles.vatBadgeText}>{v.rate}%</Text>
                   </View>
-                  <Text style={styles.vatNet}>Net {formatCurrency(v.net, currency)}</Text>
+                  <Text style={styles.vatNet}>Net {formatCents(v.net, currency)}</Text>
                 </View>
                 <View style={styles.vatRight}>
                   <Text style={styles.vatLabel}>VAT</Text>
-                  <Text style={styles.vatAmount}>{formatCurrency(v.vat, currency)}</Text>
+                  <Text style={styles.vatAmount}>{formatCents(v.vat, currency)}</Text>
                 </View>
               </View>
             ))}
             <View style={styles.vatTotalRow}>
               <Text style={styles.vatTotalLabel}>Total VAT collected</Text>
-              <Text style={styles.vatTotalAmount}>{formatCurrency(totalVat, currency)}</Text>
+              <Text style={styles.vatTotalAmount}>{formatCents(totalVat, currency)}</Text>
             </View>
           </>
         )}
@@ -270,7 +270,7 @@ td.bold { font-weight: 700; color: #16161e; }
               </View>
               <Text style={styles.itemName} numberOfLines={1}>{item.name}</Text>
               <Text style={styles.itemCount}>{item.count}×</Text>
-              <Text style={styles.itemTotal}>{formatCurrency(item.total, currency)}</Text>
+              <Text style={styles.itemTotal}>{formatCents(item.total, currency)}</Text>
             </View>
           ))
         )}
@@ -285,7 +285,7 @@ td.bold { font-weight: 700; color: #16161e; }
             <View key={m.label} style={[styles.monthRow, i === 0 && { borderTopWidth: 0, paddingTop: 0 }]}>
               <Text style={[styles.monthLabel, isCurrentMonth && { color: COLORS.text, fontWeight: '600' }]}>{m.label}</Text>
               <Text style={styles.monthCount}>{m.count} sales</Text>
-              <Text style={[styles.monthTotal, isCurrentMonth && { color: COLORS.primary }]}>{formatCurrency(m.total, currency)}</Text>
+              <Text style={[styles.monthTotal, isCurrentMonth && { color: COLORS.primary }]}>{formatCents(m.total, currency)}</Text>
             </View>
           );
         })}

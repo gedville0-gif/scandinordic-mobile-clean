@@ -12,7 +12,7 @@ import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { TransactionItem } from '@/components/TransactionItem';
 import { getTransactions, saveTransaction, deleteTransaction, bulkDeleteTransactions, getInvoices, getSettings } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, subtractCents, multiplyCents, toCents, zeroCents, type Cents } from '@/lib/money';
 import type { Transaction, TransactionType, Currency } from '@/lib/types';
 import { INCOME_CATEGORIES, EXPENSE_CATEGORIES, detectCategory } from '@/constants/categories';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -252,7 +252,7 @@ function AddModal({ visible, type, onClose, onSave, t }: AddModalProps) {
     onSave({
       id: generateId(),
       type,
-      amount: netAmt,
+      amountCents: toCents(netAmt),
       description: desc.trim(),
       category: category,
       veroCategory: getVeroCategory(category, type),
@@ -631,9 +631,9 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
     }
 
     const savedVatRows = vatRows.length >= 2
-      ? vatRows.map(r => ({ vatRate: r.vatPct, grossAmount: parseFloat(r.rowAmt.replace(',', '.')) || 0 }))
+      ? vatRows.map(r => ({ vatRate: r.vatPct, grossAmountCents: toCents(parseFloat(r.rowAmt.replace(',', '.')) || 0) }))
       : undefined;
-    onSave({ id: generateId(), type: 'expense', amount: amt, description: desc.trim(), category, veroCategory: getVeroCategory(category, 'expense'), date: dateStr, vatRate: vp, vatRows: savedVatRows, note: note || undefined, receipt_url });
+    onSave({ id: generateId(), type: 'expense', amountCents: toCents(amt), description: desc.trim(), category, veroCategory: getVeroCategory(category, 'expense'), date: dateStr, vatRate: vp, vatRows: savedVatRows, note: note || undefined, receipt_url });
     onClose();
   };
 
@@ -1055,7 +1055,7 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         return {
           id: generateId(),
           type: txType,
-          amount: Math.abs(tx.amount),
+          amount: Math.abs(tx.amountCents),
           description: tx.description,
           category,
           veroCategory: getVeroCategory(category, txType),
@@ -1116,7 +1116,7 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         return {
           id: generateId(),
           type: txType,
-          amount: amt,
+          amountCents: toCents(amt),
           description: desc,
           category: catId,
           veroCategory: getVeroCategory(catId, txType),
@@ -1731,18 +1731,18 @@ export default function EarningsScreen() {
     new Date(tx.date).getFullYear() === now.getFullYear()
   ), [transactions]);
 
-  const totalIncomeAll = useMemo(() => transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0), [transactions]);
-  const totalExpenseAll = useMemo(() => transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0), [transactions]);
+  const totalIncomeAll = useMemo(() => transactions.filter(t => t.type === 'income').reduce((s, t) => addCents(s, t.amountCents), zeroCents()), [transactions]);
+  const totalExpenseAll = useMemo(() => transactions.filter(t => t.type === 'expense').reduce((s, t) => addCents(s, t.amountCents), zeroCents()), [transactions]);
 
-  const vatCollectedAll = useMemo(() => transactions.filter(t => t.type === 'income').reduce((s, t) => s + t.amount * (t.vatRate || 0) / 100, 0), [transactions]);
-  const vatPaidAll = useMemo(() => transactions.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount * (t.vatRate || 0) / 100, 0), [transactions]);
-  const netVatAll = vatCollectedAll - vatPaidAll;
+  const vatCollectedAll = useMemo(() => transactions.filter(t => t.type === 'income').reduce((s, t) => addCents(s, multiplyCents(t.amountCents, (t.vatRate || 0) / 100)), zeroCents()), [transactions]);
+  const vatPaidAll = useMemo(() => transactions.filter(t => t.type === 'expense').reduce((s, t) => addCents(s, multiplyCents(t.amountCents, (t.vatRate || 0) / 100)), zeroCents()), [transactions]);
+  const netVatAll = subtractCents(vatCollectedAll, vatPaidAll);
 
-  const monthIncome = useMemo(() => monthTx.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0), [monthTx]);
-  const monthExpense = useMemo(() => monthTx.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0), [monthTx]);
+  const monthIncome = useMemo(() => monthTx.filter(t => t.type === 'income').reduce((s, t) => addCents(s, t.amountCents), zeroCents()), [monthTx]);
+  const monthExpense = useMemo(() => monthTx.filter(t => t.type === 'expense').reduce((s, t) => addCents(s, t.amountCents), zeroCents()), [monthTx]);
 
-  const yearIncome = useMemo(() => yearTx.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0), [yearTx]);
-  const yearExpense = useMemo(() => yearTx.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0), [yearTx]);
+  const yearIncome = useMemo(() => yearTx.filter(t => t.type === 'income').reduce((s, t) => addCents(s, t.amountCents), zeroCents()), [yearTx]);
+  const yearExpense = useMemo(() => yearTx.filter(t => t.type === 'expense').reduce((s, t) => addCents(s, t.amountCents), zeroCents()), [yearTx]);
 
   const filtered = useMemo(() => transactions.filter(tx => tx.type === activeTab), [transactions, activeTab]);
   const tabColor = activeTab === 'income' ? COLORS.success : COLORS.danger;
@@ -1797,10 +1797,10 @@ export default function EarningsScreen() {
   }, [selectedIds, t, showDialog, load, exitSelectMode]);
 
   const statCards = [
-    { label: t('totalIncome'), value: formatCurrency(totalIncomeAll, currency), color: COLORS.success, icon: 'trending-up', onPress: () => setActiveTab('income') },
-    { label: t('totalExpenses'), value: formatCurrency(totalExpenseAll, currency), color: COLORS.danger, icon: 'trending-down', onPress: () => setActiveTab('expense') },
+    { label: t('totalIncome'), value: formatCents(totalIncomeAll, currency), color: COLORS.success, icon: 'trending-up', onPress: () => setActiveTab('income') },
+    { label: t('totalExpenses'), value: formatCents(totalExpenseAll, currency), color: COLORS.danger, icon: 'trending-down', onPress: () => setActiveTab('expense') },
     { label: t('invoicesLabel'), value: String(invoiceCount), color: COLORS.info, icon: 'file-text', onPress: () => router.push('/(tabs)/invoices') },
-    { label: t('netVat'), value: formatCurrency(netVatAll, currency), color: COLORS.primary, icon: 'percent', onPress: () => router.push('/vat') },
+    { label: t('netVat'), value: formatCents(netVatAll, currency), color: COLORS.primary, icon: 'percent', onPress: () => router.push('/vat') },
   ];
 
   return (
@@ -1851,11 +1851,11 @@ export default function EarningsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>{t('thisMonth')}</Text>
           <View style={styles.summaryCard}>
-            <SummaryCol label={t('income')} value={formatCurrency(monthIncome, currency)} color={COLORS.success} />
+            <SummaryCol label={t('income')} value={formatCents(monthIncome, currency)} color={COLORS.success} />
             <View style={styles.summaryDivider} />
-            <SummaryCol label={t('expenses')} value={formatCurrency(monthExpense, currency)} color={COLORS.danger} />
+            <SummaryCol label={t('expenses')} value={formatCents(monthExpense, currency)} color={COLORS.danger} />
             <View style={styles.summaryDivider} />
-            <SummaryCol label={t('netProfit')} value={formatCurrency(monthIncome - monthExpense, currency)} color={monthIncome - monthExpense >= 0 ? COLORS.success : COLORS.danger} />
+            <SummaryCol label={t('netProfit')} value={formatCents(subtractCents(monthIncome, monthExpense), currency)} color={monthIncome - monthExpense >= 0 ? COLORS.success : COLORS.danger} />
           </View>
         </View>
 
@@ -1863,11 +1863,11 @@ export default function EarningsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>{t('thisYear')}</Text>
           <View style={styles.summaryCard}>
-            <SummaryCol label={t('income')} value={formatCurrency(yearIncome, currency)} color={COLORS.success} />
+            <SummaryCol label={t('income')} value={formatCents(yearIncome, currency)} color={COLORS.success} />
             <View style={styles.summaryDivider} />
-            <SummaryCol label={t('expenses')} value={formatCurrency(yearExpense, currency)} color={COLORS.danger} />
+            <SummaryCol label={t('expenses')} value={formatCents(yearExpense, currency)} color={COLORS.danger} />
             <View style={styles.summaryDivider} />
-            <SummaryCol label={t('netProfit')} value={formatCurrency(yearIncome - yearExpense, currency)} color={yearIncome - yearExpense >= 0 ? COLORS.success : COLORS.danger} />
+            <SummaryCol label={t('netProfit')} value={formatCents(subtractCents(yearIncome, yearExpense), currency)} color={yearIncome - yearExpense >= 0 ? COLORS.success : COLORS.danger} />
           </View>
         </View>
 
@@ -2058,7 +2058,7 @@ function TransactionEditModal({ tx, onClose, onSave, currency }: {
         <View style={{ paddingHorizontal: 20, paddingTop: 8, paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border }}>
           <Text style={{ fontSize: 15, fontWeight: '600', color: COLORS.text }} numberOfLines={1}>{tx.description}</Text>
           <Text style={{ fontSize: 20, fontWeight: '700', color: amtColor, marginTop: 2 }}>
-            {isIncome ? '+' : '-'}{formatCurrency(tx.amount, currency)}
+            {isIncome ? '+' : '-'}{formatCents(tx.amountCents, currency)}
           </Text>
         </View>
         <ScrollView style={{ maxHeight: 360 }} contentContainerStyle={{ padding: 20, gap: 20 }} showsVerticalScrollIndicator={false}>
@@ -2088,7 +2088,7 @@ function TransactionEditModal({ tx, onClose, onSave, currency }: {
               <View style={{ gap: 6 }}>
                 {tx.vatRows.map((row, i) => (
                   <View key={i} style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: COLORS.surface, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8 }}>
-                    <Text style={{ fontSize: 13, fontWeight: '600', color: COLORS.text }}>{formatCurrency(row.grossAmount, currency)}</Text>
+                    <Text style={{ fontSize: 13, fontWeight: '600', color: COLORS.text }}>{formatCents(row.grossAmountCents, currency)}</Text>
                     <Text style={{ fontSize: 12, color: COLORS.muted }}>× {row.vatRate}%</Text>
                   </View>
                 ))}

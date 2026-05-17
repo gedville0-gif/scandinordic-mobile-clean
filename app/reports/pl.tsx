@@ -7,7 +7,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { getTransactions, getSettings, getUserScopedKey } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, subtractCents, absCents, sumCents, zeroCents, type Cents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import DatePickerModal from '@/components/DatePickerModal';
 import * as Print from 'expo-print';
@@ -79,26 +79,26 @@ export default function PLScreen() {
     const income  = period.filter(tx => tx.type === 'income');
     const expense = period.filter(tx => tx.type === 'expense');
 
-    const revenue   = income.reduce((s, t) => s + t.amount, 0);
-    const purchases = expense.filter(t => PURCHASE_CATS.has(t.category)).reduce((s, t) => s + t.amount, 0);
-    const payroll   = expense.filter(t => PAYROLL_CATS.has(t.category)).reduce((s, t) => s + t.amount, 0);
-    const pension   = expense.filter(t => PENSION_CATS.has(t.category)).reduce((s, t) => s + t.amount, 0);
-    const deprec    = expense.filter(t => DEPREC_CATS.has(t.category)).reduce((s, t) => s + t.amount, 0);
-    const financial = expense.filter(t => FINANCIAL_CATS.has(t.category)).reduce((s, t) => s + t.amount, 0);
+    const revenue   = income.reduce((s, t) => addCents(s, t.amountCents), zeroCents());
+    const purchases = expense.filter(t => PURCHASE_CATS.has(t.category)).reduce((s, t) => addCents(s, t.amountCents), zeroCents());
+    const payroll   = expense.filter(t => PAYROLL_CATS.has(t.category)).reduce((s, t) => addCents(s, t.amountCents), zeroCents());
+    const pension   = expense.filter(t => PENSION_CATS.has(t.category)).reduce((s, t) => addCents(s, t.amountCents), zeroCents());
+    const deprec    = expense.filter(t => DEPREC_CATS.has(t.category)).reduce((s, t) => addCents(s, t.amountCents), zeroCents());
+    const financial = expense.filter(t => FINANCIAL_CATS.has(t.category)).reduce((s, t) => addCents(s, t.amountCents), zeroCents());
     const other     = expense.filter(t =>
       !PURCHASE_CATS.has(t.category) && !PAYROLL_CATS.has(t.category) &&
       !PENSION_CATS.has(t.category)  && !DEPREC_CATS.has(t.category)  &&
       !FINANCIAL_CATS.has(t.category)
-    ).reduce((s, t) => s + t.amount, 0);
+    ).reduce((s, t) => addCents(s, t.amountCents), zeroCents());
 
-    const staffTotal  = payroll + pension;
-    const opProfit    = revenue - purchases - staffTotal - deprec - other;
-    const profitBT    = opProfit - financial;
+    const staffTotal  = addCents(payroll, pension);
+    const opProfit    = subtractCents(revenue, sumCents([purchases, staffTotal, deprec, other]));
+    const profitBT    = subtractCents(opProfit, financial);
 
     return { revenue, purchases, staffTotal, deprec, other, opProfit, financial, profitBT };
   }, [transactions, startDate, endDate]);
 
-  const rows: { label: string; value: number; isExpense?: boolean; isTotal?: boolean; indent?: boolean }[] = [
+  const rows: { label: string; value: Cents; isExpense?: boolean; isTotal?: boolean; indent?: boolean }[] = [
     { label: t('revenue'),         value: computed.revenue,    isTotal: true },
     { label: t('purchases'),       value: computed.purchases,  isExpense: true, indent: true },
     { label: t('staffCosts'),      value: computed.staffTotal, isExpense: true, indent: true },
@@ -110,13 +110,13 @@ export default function PLScreen() {
     { label: t('periodProfit'),    value: computed.profitBT,   isTotal: true },
   ];
 
-  const fmt = (v: number, isExpense?: boolean) =>
-    (isExpense && v > 0 ? '- ' : '') + formatCurrency(Math.abs(v), currency);
+  const fmt = (v: Cents, isExpense?: boolean) =>
+    (isExpense && v > 0 ? '- ' : '') + formatCents(absCents(v), currency);
 
   const handleExportPDF = useCallback(async () => {
-    const fmtPdf = (v: number) => formatCurrency(Math.abs(v), currency);
-    const sign = (v: number, isExp?: boolean) => (isExp && v > 0 ? '− ' : '') + fmtPdf(v);
-    const entries: { label: string; value: number; isExpense: boolean; isTotal: boolean }[] = [
+    const fmtPdf = (v: Cents) => formatCents(absCents(v), currency);
+    const sign = (v: Cents, isExp?: boolean) => (isExp && v > 0 ? '− ' : '') + fmtPdf(v);
+    const entries: { label: string; value: Cents; isExpense: boolean; isTotal: boolean }[] = [
       { label: t('revenue'),         value: computed.revenue,    isExpense: false, isTotal: true  },
       { label: t('purchases'),       value: computed.purchases,  isExpense: true,  isTotal: false },
       { label: t('staffCosts'),      value: computed.staffTotal, isExpense: true,  isTotal: false },
@@ -250,7 +250,7 @@ export default function PLScreen() {
         <View style={[styles.highlightCard, { borderColor: computed.profitBT >= 0 ? COLORS.primary + '40' : COLORS.danger + '40' }]}>
           <Text style={styles.highlightLabel}>{t('periodProfit')}</Text>
           <Text style={[styles.highlightValue, { color: computed.profitBT >= 0 ? COLORS.primary : COLORS.danger }]}>
-            {formatCurrency(computed.profitBT, currency)}
+            {formatCents(computed.profitBT, currency)}
           </Text>
         </View>
 

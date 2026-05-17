@@ -8,7 +8,7 @@ import { Feather } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { getTransactions, getSettings } from '@/lib/storage';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, subtractCents, zeroCents, type Cents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
 
@@ -24,9 +24,14 @@ const TAX_BRACKETS = [
   { label: '€85,800+',          min: 85800, max: Infinity, rate: 0.44   },
 ];
 
-function estimateTax(profit: number): number {
-  const p = Math.max(0, profit);
-  return TAX_BRACKETS.reduce((sum, b) => sum + Math.max(0, Math.min(p, b.max) - b.min) * b.rate, 0);
+function estimateTax(profitCents: Cents): Cents {
+  // TAX_BRACKETS use whole-euro thresholds; convert to cents inline.
+  const p = Math.max(0, profitCents);
+  const tax = TAX_BRACKETS.reduce(
+    (sum, b) => sum + Math.max(0, Math.min(p, b.max * 100) - b.min * 100) * b.rate,
+    0,
+  );
+  return Math.round(tax) as Cents;
 }
 
 function catLabel(key: string, t: (k: string) => string): string {
@@ -42,18 +47,18 @@ const SLICE_COLORS = [
   '#5AC8FA', '#FFCC00', '#FF6B35', '#1ABC9C', '#E74C3C',
 ];
 
-interface SliceData { key: string; label: string; amount: number; pct: number; color: string; }
+interface SliceData { key: string; label: string; amount: Cents; pct: number; color: string; }
 
-function buildSlices(map: Record<string, number>, total: number, otherLabel: string, t: (k: string) => string): SliceData[] {
+function buildSlices(map: Record<string, Cents>, total: Cents, otherLabel: string, t: (k: string) => string): SliceData[] {
   if (total === 0) return [];
   const OTHER_THRESHOLD = 0.04; // < 4% gets grouped
   const entries = Object.entries(map).sort(([, a], [, b]) => b - a);
   const main: SliceData[] = [];
-  let otherTotal = 0;
+  let otherTotal = zeroCents();
   entries.forEach(([key, amount], i) => {
     const pct = amount / total;
     if (pct < OTHER_THRESHOLD || i >= 8) {
-      otherTotal += amount;
+      otherTotal = addCents(otherTotal, amount);
     } else {
       main.push({ key, label: catLabel(key, t), amount, pct, color: SLICE_COLORS[main.length % SLICE_COLORS.length] });
     }
@@ -66,7 +71,7 @@ function buildSlices(map: Record<string, number>, total: number, otherLabel: str
 
 // Donut chart component
 function DonutChart({ slices, total, currency, size = 160 }: {
-  slices: SliceData[]; total: number; currency: Currency; size?: number;
+  slices: SliceData[]; total: Cents; currency: Currency; size?: number;
 }) {
   const cx = size / 2;
   const cy = size / 2;
@@ -101,7 +106,7 @@ function DonutChart({ slices, total, currency, size = 160 }: {
     return { d, color: s.color };
   });
 
-  const fmt = formatCurrency(total, currency);
+  const fmt = formatCents(total, currency);
   const fontSize = fmt.length > 8 ? 11 : fmt.length > 6 ? 13 : 15;
 
   return (
@@ -172,17 +177,17 @@ export default function ReportsScreen() {
     return transactions;
   }, [transactions, period]);
 
-  const totalIncome = useMemo(() => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => s + tx.amount, 0), [filtered]);
-  const totalExpenses = useMemo(() => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => s + tx.amount, 0), [filtered]);
-  const netProfit = totalIncome - totalExpenses;
+  const totalIncome = useMemo(() => filtered.filter(tx => tx.type === 'income').reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()), [filtered]);
+  const totalExpenses = useMemo(() => filtered.filter(tx => tx.type === 'expense').reduce((s, tx) => addCents(s, tx.amountCents), zeroCents()), [filtered]);
+  const netProfit = subtractCents(totalIncome, totalExpenses);
 
   const taxEstimate = useMemo(() => estimateTax(netProfit), [netProfit]);
 
-  const incomeByCategory: Record<string, number> = {};
-  const expenseByCategory: Record<string, number> = {};
+  const incomeByCategory: Record<string, Cents> = {};
+  const expenseByCategory: Record<string, Cents> = {};
   filtered.forEach(tx => {
-    if (tx.type === 'income') incomeByCategory[tx.category] = (incomeByCategory[tx.category] || 0) + tx.amount;
-    else expenseByCategory[tx.category] = (expenseByCategory[tx.category] || 0) + tx.amount;
+    if (tx.type === 'income') incomeByCategory[tx.category] = addCents(incomeByCategory[tx.category] ?? zeroCents(), tx.amountCents);
+    else expenseByCategory[tx.category] = addCents(expenseByCategory[tx.category] ?? zeroCents(), tx.amountCents);
   });
 
   const catTotal = catMode === 'income' ? totalIncome : totalExpenses;
@@ -239,16 +244,16 @@ export default function ReportsScreen() {
           <View style={styles.taxRow}>
             <View style={[styles.taxItem, { borderRightWidth: 1, borderRightColor: COLORS.border }]}>
               <Text style={styles.taxLabel}>{t('netProfit')}</Text>
-              <Text style={[styles.taxValue, { color: COLORS.text }]}>{formatCurrency(netProfit, currency)}</Text>
+              <Text style={[styles.taxValue, { color: COLORS.text }]}>{formatCents(netProfit, currency)}</Text>
             </View>
             <View style={[styles.taxItem, { borderRightWidth: 1, borderRightColor: COLORS.border }]}>
               <Text style={styles.taxLabel}>{t('estimated')}</Text>
-              <Text style={[styles.taxValue, { color: COLORS.danger }]}>{formatCurrency(taxEstimate, currency)}</Text>
+              <Text style={[styles.taxValue, { color: COLORS.danger }]}>{formatCents(taxEstimate, currency)}</Text>
             </View>
             <View style={styles.taxItem}>
               <Text style={styles.taxLabel}>{t('afterTax')}</Text>
               <Text style={[styles.taxValue, { color: netProfit - taxEstimate >= 0 ? COLORS.success : COLORS.danger }]}>
-                {formatCurrency(Math.max(0, netProfit - taxEstimate), currency)}
+                {formatCents(netProfit > taxEstimate ? subtractCents(netProfit, taxEstimate) : zeroCents(), currency)}
               </Text>
             </View>
           </View>
@@ -288,7 +293,7 @@ export default function ReportsScreen() {
                   <View style={[styles.legendDot, { backgroundColor: s.color }]} />
                   <View style={{ flex: 1 }}>
                     <Text style={styles.legendLabel} numberOfLines={1}>{s.label}</Text>
-                    <Text style={styles.legendSub}>{formatCurrency(s.amount, currency)}  {(s.pct * 100).toFixed(1)}%</Text>
+                    <Text style={styles.legendSub}>{formatCents(s.amount, currency)}  {(s.pct * 100).toFixed(1)}%</Text>
                   </View>
                 </View>
               ))}

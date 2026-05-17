@@ -7,7 +7,7 @@ import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '@/constants/colors';
 import { INCOME_CATEGORIES, EXPENSE_CATEGORIES } from '@/constants/categories';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, absCents } from '@/lib/money';
 import type { Transaction, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
 
@@ -90,7 +90,7 @@ export function PDFReviewModal({ visible, transactions: initial, onConfirm, onCa
           </View>
           <View style={styles.rowRight}>
             <Text style={[styles.rowAmount, { color }]}>
-              {isIncome ? '+' : '-'}{formatCurrency(Math.abs(item.amount), currency)}
+              {isIncome ? '+' : '-'}{formatCents(absCents(item.amountCents), currency)}
             </Text>
             <Text style={styles.rowDate}>{date}</Text>
           </View>
