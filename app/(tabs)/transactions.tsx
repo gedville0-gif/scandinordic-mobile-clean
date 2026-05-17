@@ -1447,15 +1447,12 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         bankId = 'op';
       }
 
-      console.log(`🏦 Filename-based guess: ${bankId} (server will auto-detect from PDF content)`);
-      console.log('🔄 Sending to PDF parser service...');
-
       // Call PDF parser service
       const parseResponse = await fetch('https://scandinordic-mobile-clean-production.up.railway.app/parse', { // Change after Railway deployment
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Parser-Secret': 'scandinordic2026' // TODO: Move to env config
+          'X-Parser-Secret': process.env.EXPO_PUBLIC_PARSER_SECRET ?? ''
         },
         body: JSON.stringify({
           pdf: pdfBase64,
