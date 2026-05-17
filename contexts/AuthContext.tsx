@@ -163,7 +163,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           throw sessionError;
         }
         const uid = sessionData.session?.user?.id ?? null;
-        console.log('[auth] PKCE session — user.id:', uid, '| email:', sessionData.session?.user?.email);
+        console.log('[auth] PKCE session — user.id:', uid);
         if (!uid) { await supabase.auth.signOut(); return; }
         setCurrentUserId(uid);
       } else {
@@ -171,8 +171,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         // is explicitly configured for implicit flow in the dashboard)
         const accessToken  = url.match(/[#&?]access_token=([^&]+)/)?.[1];
         const refreshToken = url.match(/[#&?]refresh_token=([^&]+)/)?.[1];
-        console.log('[auth] implicit flow — access_token:', !!accessToken, '| refresh_token:', !!refreshToken);
-
+        console.log('[auth] implicit flow | access_token:', !!accessToken, '| refresh_token:', !!refreshToken);
         if (!accessToken || !refreshToken) {
           console.error('[auth] no code or tokens in callback URL:', url);
           await supabase.auth.signOut();
@@ -188,7 +187,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           throw sessionError;
         }
         const uid = sessionData.session?.user?.id ?? null;
-        console.log('[auth] implicit setSession — user.id:', uid, '| email:', sessionData.session?.user?.email);
+        console.log('[auth] implicit setSession — user.id:', uid);
         if (!uid) { await supabase.auth.signOut(); return; }
         setCurrentUserId(uid);
       }
