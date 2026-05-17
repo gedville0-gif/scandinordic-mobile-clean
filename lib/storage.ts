@@ -1,6 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from './supabase';
 import { getCurrentUserId } from './session';
+import { toCents } from './money';
 import type { Transaction, Invoice, Settings, OnboardingProfile, Worker, WorkSession } from './types';
 
 async function getUid(): Promise<string | null> {
@@ -90,7 +91,7 @@ export async function saveInvoice(inv: Invoice): Promise<void> {
   console.log('[invoices] upserting:', inv);
   const { error } = await supabase
     .from('invoices')
-    .upsert({ id: inv.id, user_id: userId, invoice_number: inv.invoiceNumber, invoice_date: inv.issueDate, due_date: inv.dueDate, customer_name: inv.clientName, total_amount: inv.totalAmount, status: inv.status, data: inv }, { onConflict: 'id' });
+    .upsert({ id: inv.id, user_id: userId, invoice_number: inv.invoiceNumber, invoice_date: inv.issueDate, due_date: inv.dueDate, customer_name: inv.clientName, total_amount_cents: inv.totalAmountCents, status: inv.status, data: inv }, { onConflict: 'id' });
   if (error) console.error('[invoices] upsert failed:', error);
 }
 
@@ -226,21 +227,21 @@ export async function seedDemoData(): Promise<void> {
   const year = now.getFullYear();
 
   const transactions: Transaction[] = [
-    { id: '1', type: 'income', amount: 3200, description: 'Website Design Project', category: 'Consulting', date: new Date(year, month, 3).toISOString(), vatRate: 24 },
-    { id: '2', type: 'income', amount: 1800, description: 'Monthly Retainer - Acme Corp', category: 'Consulting', date: new Date(year, month, 7).toISOString(), vatRate: 24 },
-    { id: '3', type: 'expense', amount: 299, description: 'Adobe Creative Cloud', category: 'Software', date: new Date(year, month, 5).toISOString(), vatRate: 24 },
-    { id: '4', type: 'expense', amount: 85, description: 'Office Supplies', category: 'Office', date: new Date(year, month, 8).toISOString(), vatRate: 24 },
-    { id: '5', type: 'income', amount: 750, description: 'Copywriting - Blog Posts', category: 'Writing', date: new Date(year, month, 12).toISOString(), vatRate: 24 },
-    { id: '6', type: 'expense', amount: 420, description: 'Business Travel', category: 'Travel', date: new Date(year, month, 14).toISOString(), vatRate: 24 },
-    { id: '7', type: 'income', amount: 2100, description: 'App Development Sprint', category: 'Development', date: new Date(year, month, 18).toISOString(), vatRate: 24 },
-    { id: '8', type: 'expense', amount: 150, description: 'Cloud Hosting', category: 'Software', date: new Date(year, month, 20).toISOString(), vatRate: 24 },
+    { id: '1', type: 'income',  amountCents: toCents(3200), description: 'Website Design Project',     category: 'Consulting',  date: new Date(year, month, 3).toISOString(),  vatRate: 24 },
+    { id: '2', type: 'income',  amountCents: toCents(1800), description: 'Monthly Retainer - Acme Corp', category: 'Consulting',  date: new Date(year, month, 7).toISOString(),  vatRate: 24 },
+    { id: '3', type: 'expense', amountCents: toCents(299),  description: 'Adobe Creative Cloud',         category: 'Software',    date: new Date(year, month, 5).toISOString(),  vatRate: 24 },
+    { id: '4', type: 'expense', amountCents: toCents(85),   description: 'Office Supplies',              category: 'Office',      date: new Date(year, month, 8).toISOString(),  vatRate: 24 },
+    { id: '5', type: 'income',  amountCents: toCents(750),  description: 'Copywriting - Blog Posts',     category: 'Writing',     date: new Date(year, month, 12).toISOString(), vatRate: 24 },
+    { id: '6', type: 'expense', amountCents: toCents(420),  description: 'Business Travel',              category: 'Travel',      date: new Date(year, month, 14).toISOString(), vatRate: 24 },
+    { id: '7', type: 'income',  amountCents: toCents(2100), description: 'App Development Sprint',       category: 'Development', date: new Date(year, month, 18).toISOString(), vatRate: 24 },
+    { id: '8', type: 'expense', amountCents: toCents(150),  description: 'Cloud Hosting',                category: 'Software',    date: new Date(year, month, 20).toISOString(), vatRate: 24 },
   ];
   await supabase.from('transactions').insert(transactions.map(t => ({ id: t.id, user_id: userId, data: t })));
 
   const invoices: Invoice[] = [
-    { id: 'i1', invoiceNumber: 'INV-001', clientName: 'Acme Corp', clientEmail: 'billing@acme.com', amount: 3200, vatAmount: 768, totalAmount: 3968, status: 'paid', issueDate: new Date(year, month, 1).toISOString(), dueDate: new Date(year, month, 31).toISOString(), currency: 'EUR' },
-    { id: 'i2', invoiceNumber: 'INV-002', clientName: 'Nordic Solutions', clientEmail: 'finance@nordic.fi', amount: 1800, vatAmount: 432, totalAmount: 2232, status: 'sent', issueDate: new Date(year, month, 5).toISOString(), dueDate: new Date(year, month + 1, 5).toISOString(), currency: 'EUR' },
-    { id: 'i3', invoiceNumber: 'INV-003', clientName: 'Svenska AB', amount: 2100, vatAmount: 504, totalAmount: 2604, status: 'draft', issueDate: new Date(year, month, 18).toISOString(), dueDate: new Date(year, month + 1, 18).toISOString(), currency: 'EUR' },
+    { id: 'i1', invoiceNumber: 'INV-001', clientName: 'Acme Corp',        clientEmail: 'billing@acme.com',   amountCents: toCents(3200), vatAmountCents: toCents(768), totalAmountCents: toCents(3968), status: 'paid',  issueDate: new Date(year, month, 1).toISOString(),  dueDate: new Date(year, month, 31).toISOString(),    currency: 'EUR' },
+    { id: 'i2', invoiceNumber: 'INV-002', clientName: 'Nordic Solutions', clientEmail: 'finance@nordic.fi',  amountCents: toCents(1800), vatAmountCents: toCents(432), totalAmountCents: toCents(2232), status: 'sent',  issueDate: new Date(year, month, 5).toISOString(),  dueDate: new Date(year, month + 1, 5).toISOString(), currency: 'EUR' },
+    { id: 'i3', invoiceNumber: 'INV-003', clientName: 'Svenska AB',                                          amountCents: toCents(2100), vatAmountCents: toCents(504), totalAmountCents: toCents(2604), status: 'draft', issueDate: new Date(year, month, 18).toISOString(), dueDate: new Date(year, month + 1, 18).toISOString(), currency: 'EUR' },
   ];
   await supabase.from('invoices').insert(invoices.map(i => ({ id: i.id, user_id: userId, data: i })));
 }

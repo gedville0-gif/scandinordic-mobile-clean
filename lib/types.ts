@@ -1,15 +1,17 @@
+import type { Cents } from './money';
+
 export type TransactionType = 'income' | 'expense';
 
 export interface Transaction {
   id: string;
   type: TransactionType;
-  amount: number;
+  amountCents: Cents;
   description: string;
   category: string;
   veroCategory?: string;
   date: string;
   vatRate?: number;
-  vatRows?: { vatRate: number; grossAmount: number }[];
+  vatRows?: { vatRate: number; grossAmountCents: Cents }[];
   notes?: string;
   clientName?: string;
   status?: 'paid' | 'unpaid';
@@ -23,12 +25,16 @@ export interface InvoiceLineItem {
   period?: string;
   quantity: number;
   unit: string;
-  unitPrice: number;
+  unitPriceCents: Cents;
   vatPercent: number;
   vatIncluded?: boolean;
-  discount: string;
-  lineTotal: number;
-  lineVatAmount: number;
+  // Replaces the old `discount: string` antipattern. Use at most one:
+  //   discountPercent: 0..100 (percentage off pre-tax line)
+  //   discountAmountCents: fixed-value discount in cents
+  discountPercent?: number;
+  discountAmountCents?: Cents;
+  lineTotalCents: Cents;
+  lineVatAmountCents: Cents;
 }
 
 export interface Invoice {
@@ -63,9 +69,9 @@ export interface Invoice {
   // Line items
   lineItems?: InvoiceLineItem[];
   // Totals
-  amount: number;
-  vatAmount: number;
-  totalAmount: number;
+  amountCents: Cents;
+  vatAmountCents: Cents;
+  totalAmountCents: Cents;
   // Meta
   status: 'draft' | 'sent' | 'paid' | 'overdue';
   currency: string;
@@ -77,7 +83,7 @@ export interface Worker {
   id: string;
   name: string;
   categoryId: string;
-  hourlyRate: number;
+  hourlyRateCents: Cents;
   createdAt: string;
 }
 
