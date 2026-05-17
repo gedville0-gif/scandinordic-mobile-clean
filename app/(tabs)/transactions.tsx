@@ -33,9 +33,6 @@ try { ImagePicker = require('expo-image-picker'); } catch {}
 try { DocumentPicker = require('expo-document-picker'); } catch {}
 try { Papa = require('papaparse'); } catch {}
 
-import { convertPdfToOptimizedImages, cleanupTempImages } from '@/src/services/pdfToImages';
-import { parseFinnishBankStatement, type ParsedTransaction } from '@/src/services/finnishBankParser';
-
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const VAT_PRESETS = [0, 10, 13.5, 25.5];
@@ -988,8 +985,6 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
     setLoading(true);
     setError('');
 
-    let tempImageUris: string[] = [];
-
     try {
       console.log('📄 Starting PDF import process');
 
@@ -1096,15 +1091,6 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         setError('PDF import failed: ' + (e?.message ?? 'Unknown error'));
       }
     } finally {
-      // Clean up any temporary image files (usually none with direct PDF processing)
-      if (tempImageUris.length > 0) {
-        try {
-          await cleanupTempImages(tempImageUris);
-          console.log('🗑️ Temp files cleaned up');
-        } catch (cleanupError) {
-          console.log('⚠️ Cleanup error:', cleanupError);
-        }
-      }
       setLoading(false);
     }
   };
