@@ -1,5 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as SecureStore from 'expo-secure-store';
 
 const SUPABASE_URL =
   process.env.EXPO_PUBLIC_SUPABASE_URL || 'https://cuqoesrwrixjraynalej.supabase.co';
@@ -20,9 +20,29 @@ if (!SUPABASE_ANON_KEY) {
 // Auth calls will fail gracefully via the 6 s timeout in AuthContext.
 const safeKey = SUPABASE_ANON_KEY || 'MISSING_KEY_SEE_CONSOLE';
 
+const secureStorage = {
+  getItem: async (key: string): Promise<string | null> => {
+    try {
+      return await SecureStore.getItemAsync(key);
+    } catch {
+      return null;
+    }
+  },
+  setItem: async (key: string, value: string): Promise<void> => {
+    try {
+      await SecureStore.setItemAsync(key, value);
+    } catch {}
+  },
+  removeItem: async (key: string): Promise<void> => {
+    try {
+      await SecureStore.deleteItemAsync(key);
+    } catch {}
+  },
+};
+
 export const supabase = createClient(SUPABASE_URL, safeKey, {
   auth: {
-    storage: AsyncStorage,
+    storage: secureStorage,
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false,
