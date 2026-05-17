@@ -28,11 +28,11 @@ export interface InvoiceLineItem {
   unitPriceCents: Cents;
   vatPercent: number;
   vatIncluded?: boolean;
-  // Replaces the old `discount: string` antipattern. Use at most one:
-  //   discountPercent: 0..100 (percentage off pre-tax line)
-  //   discountAmountCents: fixed-value discount in cents
-  discountPercent?: number;
-  discountAmountCents?: Cents;
+  // TODO: split into discountPercent?: number + discountAmountCents?: Cents.
+  // Currently a string like "10%" or "€5.00", parsed ad-hoc by parsePdfDiscount.
+  // String-money is an antipattern flagged in the audit. Migrate when the
+  // invoice form UI gets a radio (percent vs fixed) input.
+  discount?: string;
   lineTotalCents: Cents;
   lineVatAmountCents: Cents;
 }

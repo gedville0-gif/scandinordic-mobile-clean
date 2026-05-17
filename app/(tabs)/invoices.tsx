@@ -11,7 +11,7 @@ import { InvoiceCard } from '@/components/InvoiceCard';
 import { getInvoices, saveInvoice, deleteInvoice, getSettings } from '@/lib/storage';
 import type { Invoice, InvoiceLineItem, Settings, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { formatCurrency } from '@/lib/currency';
+import { formatCents, addCents, subtractCents, multiplyCents, toCents, zeroCents, computeVatFromGross, computeVatFromNet, type Cents } from '@/lib/money';
 import { useAppDialog } from '@/components/AppDialog';
 import DatePickerModal from '@/components/DatePickerModal';
 
@@ -101,7 +101,7 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
     clientAddress, clientCity, clientPostalCode, clientCountry,
     clientEmail, clientPhone,
     invoiceNumber, issueDate, dueDate, referenceNumber,
-    lineItems = [], totalAmount, vatAmount, additionalInfo, vatIncluded,
+    lineItems = [], totalAmountCents, vatAmountCents, additionalInfo, vatIncluded,
   } = invoice;
 
   // ── Date formatter — locale-aware (mirrors web fmtDate) ──────────────────────
@@ -118,30 +118,30 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
   };
 
   // ── Discount parser (mirrors web parsePdfDiscount) ───────────────────────────
-  const parsePdfDiscount = (raw: string, base: number): number => {
-    if (!raw || !raw.trim()) return 0;
+  const parsePdfDiscount = (raw: string | undefined, baseCents: Cents): Cents => {
+    if (!raw || !raw.trim()) return zeroCents();
     const s = raw.trim();
-    if (s.endsWith('%')) { const p = parseFloat(s); return isNaN(p) ? 0 : base * p / 100; }
+    if (s.endsWith('%')) { const p = parseFloat(s); return isNaN(p) ? zeroCents() : multiplyCents(baseCents, p / 100); }
     const n = parseFloat(s.replace(/[€$£,\s]/g, ''));
-    return isNaN(n) ? 0 : n;
+    return isNaN(n) ? zeroCents() : toCents(n);
   };
 
   // ── Totals (mirrors web generatePdf.ts) ─────────────────────────────────────
   const hasDiscount = lineItems.some(li => li.discount?.trim());
 
-  const preDiscountSubtotal = lineItems.reduce((s, li) =>
-    s + (li.vatIncluded
-      ? li.quantity * li.unitPrice / (1 + li.vatPercent / 100)
-      : li.quantity * li.unitPrice), 0);
+  const preDiscountSubtotal = lineItems.reduce((s, li) => {
+    const lineGross = multiplyCents(li.unitPriceCents, li.quantity);
+    return addCents(s, li.vatIncluded ? computeVatFromGross(lineGross, li.vatPercent).net : lineGross);
+  }, zeroCents());
 
   const totalDiscountAmt = lineItems.reduce((s, li) =>
-    s + parsePdfDiscount(li.discount, li.quantity * li.unitPrice), 0);
+    addCents(s, parsePdfDiscount(li.discount, multiplyCents(li.unitPriceCents, li.quantity))), zeroCents());
 
-  const netTotal = preDiscountSubtotal - totalDiscountAmt;
+  const netTotal = subtractCents(preDiscountSubtotal, totalDiscountAmt);
 
-  const vatGroups: Record<number, number> = {};
+  const vatGroups: Record<number, Cents> = {};
   lineItems.forEach(li => {
-    vatGroups[li.vatPercent] = (vatGroups[li.vatPercent] || 0) + li.lineVatAmount;
+    vatGroups[li.vatPercent] = addCents(vatGroups[li.vatPercent] ?? zeroCents(), li.lineVatAmountCents);
   });
 
   // Discount column header suffix (e.g. " 10%" or " €")
@@ -155,7 +155,7 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
   // Meta bar total: net when VAT excluded (mirrors web metaTotalAmt)
   const anyVatIncluded = lineItems.some(li => li.vatIncluded);
   const vatModeLabel = anyVatIncluded ? pdfT('vatIncluded') : pdfT('vatExcluded');
-  const metaTotalAmt = anyVatIncluded ? totalAmount : totalAmount - (vatAmount || 0);
+  const metaTotalAmt = anyVatIncluded ? totalAmountCents : subtractCents(totalAmountCents, vatAmountCents ?? zeroCents());
 
   // ── Barcode SVG — same bit-pattern algorithm as web generatePdf.ts ──────────
   const buildBarcodeSvg = (value: string, w: number, h: number): string => {
@@ -179,8 +179,8 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
 
   // ── Line items HTML ──────────────────────────────────────────────────────────
   const lineItemsHtml = lineItems.map((li, i) => {
-    const net = li.lineTotal - li.lineVatAmount;
-    const discAmt = parsePdfDiscount(li.discount, li.quantity * li.unitPrice);
+    const net = subtractCents(li.lineTotalCents, li.lineVatAmountCents);
+    const discAmt = parsePdfDiscount(li.discount, multiplyCents(li.unitPriceCents, li.quantity));
     return `
     <tr class="${i % 2 === 1 ? 'alt' : ''}">
       <td class="desc">${li.description || ''}${li.period ? `<br><span class="period">${li.period}</span>` : ''}</td>
@@ -189,7 +189,7 @@ function buildInvoiceHtml(invoice: Invoice, currency: Currency, settings: Settin
       <td class="r">${fmt(net)}</td>
       ${hasDiscount ? `<td class="r">${discAmt > 0 ? fmt(discAmt) : ''}</td>` : ''}
       <td class="r">${li.vatPercent}%</td>
-      <td class="r bold">${fmt(li.lineTotal)}</td>
+      <td class="r bold">${fmt(li.lineTotalCents)}</td>
     </tr>`;
   }).join('');
 
@@ -375,7 +375,7 @@ ${lineItems.length > 0 ? `
         <div class="bc-row"><span class="bc-k">${pdfT('iban')}:</span><span class="bc-v">${fromIban}</span></div>
         ${fromBic        ? `<div class="bc-row"><span class="bc-k">${pdfT('bic')}:</span><span class="bc-v">${fromBic}</span></div>` : ''}
         <div class="bc-row"><span class="bc-k">${pdfT('referenceNo')}:</span><span class="bc-v">${referenceNumber}</span></div>
-        <div class="bc-row"><span class="bc-k">${pdfT('amount')}:</span><span class="bc-v">${fmt(totalAmount)}</span></div>
+        <div class="bc-row"><span class="bc-k">${pdfT('amount')}:</span><span class="bc-v">${fmt(totalAmountCents)}</span></div>
         ${dueDate ? `<div class="bc-row"><span class="bc-k">${pdfT('dueDate')}:</span><span class="bc-v">${fmtDate(dueDate)}</span></div>` : ''}
       </div>
     </div>` : ''}
@@ -390,7 +390,7 @@ ${lineItems.length > 0 ? `
     <div class="total-row"><span class="tlbl">${pdfT('afterDiscount')}</span><span class="tval">${fmt(netTotal)}</span></div>` : ''}
     ${vatRowsHtml}
     <div class="total-rule"></div>
-    <div class="grand-total"><span>${pdfT('totalAmount')}</span><span>${fmt(totalAmount)}</span></div>
+    <div class="grand-total"><span>${pdfT('totalAmount')}</span><span>${fmt(totalAmountCents)}</span></div>
   </div>
 </div>
 
@@ -432,36 +432,40 @@ function getNextInvoiceNumber(invoices: Invoice[]): string {
   return `INV-${String(max + 1).padStart(3, '0')}`;
 }
 
-function parseDiscount(discount: string, gross: number): number {
-  if (!discount) return 0;
+function parseDiscount(discount: string | undefined, grossCents: Cents): Cents {
+  if (!discount) return zeroCents();
   const s = discount.trim();
   if (s.endsWith('%')) {
     const pct = parseFloat(s.slice(0, -1));
-    return isNaN(pct) ? 0 : gross * pct / 100;
+    return isNaN(pct) ? zeroCents() : multiplyCents(grossCents, pct / 100);
   }
   const val = parseFloat(s.replace(',', '.'));
-  return isNaN(val) ? 0 : val;
+  return isNaN(val) ? zeroCents() : toCents(val);
 }
 
 function recalcLineItem(li: InvoiceLineItem): InvoiceLineItem {
-  const gross = li.quantity * li.unitPrice;
+  const gross = multiplyCents(li.unitPriceCents, li.quantity);
   const discAmt = parseDiscount(li.discount, gross);
-  const afterDiscount = Math.max(0, gross - discAmt);
-  let lineNet: number, lineVatAmount: number, lineTotal: number;
+  const afterDiscount = (gross > discAmt ? subtractCents(gross, discAmt) : zeroCents());
+  let lineNet: Cents;
+  let lineVatAmount: Cents;
+  let lineTotal: Cents;
   if (li.vatIncluded) {
     lineTotal = afterDiscount;
-    lineNet = lineTotal / (1 + li.vatPercent / 100);
-    lineVatAmount = lineTotal - lineNet;
+    const r = computeVatFromGross(lineTotal, li.vatPercent);
+    lineNet = r.net;
+    lineVatAmount = r.vat;
   } else {
     lineNet = afterDiscount;
-    lineVatAmount = lineNet * (li.vatPercent / 100);
-    lineTotal = lineNet + lineVatAmount;
+    const r = computeVatFromNet(lineNet, li.vatPercent);
+    lineVatAmount = r.vat;
+    lineTotal = r.gross;
   }
-  return { ...li, lineTotal, lineVatAmount };
+  return { ...li, lineTotalCents: lineTotal, lineVatAmountCents: lineVatAmount };
 }
 
 function defaultLineItem(): InvoiceLineItem {
-  return { id: genId(), description: '', period: '', quantity: 1, unit: 'pcs', unitPrice: 0, vatPercent: 25.5, vatIncluded: false, discount: '', lineTotal: 0, lineVatAmount: 0 };
+  return { id: genId(), description: '', period: '', quantity: 1, unit: 'pcs', unitPriceCents: zeroCents(), vatPercent: 25.5, vatIncluded: false, discount: '', lineTotalCents: zeroCents(), lineVatAmountCents: zeroCents() };
 }
 
 function calcDueDateStr(issueDateStr: string, term: string): string {
@@ -557,10 +561,10 @@ export default function InvoicesScreen() {
   };
 
   const filtered = activeFilter === 'all' ? invoices : invoices.filter(i => i.status === activeFilter);
-  const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => s + i.totalAmount, 0);
-  const totalPending = invoices.filter(i => i.status === 'sent').reduce((s, i) => s + i.totalAmount, 0);
+  const totalPaid = invoices.filter(i => i.status === 'paid').reduce((s, i) => addCents(s, i.totalAmountCents), zeroCents());
+  const totalPending = invoices.filter(i => i.status === 'sent').reduce((s, i) => addCents(s, i.totalAmountCents), zeroCents());
   const unpaidCount = invoices.filter(i => i.status === 'sent' || i.status === 'overdue').length;
-  const unpaidTotal = invoices.filter(i => i.status === 'sent' || i.status === 'overdue').reduce((s, i) => s + i.totalAmount, 0);
+  const unpaidTotal = invoices.filter(i => i.status === 'sent' || i.status === 'overdue').reduce((s, i) => addCents(s, i.totalAmountCents), zeroCents());
 
   return (
     <View style={{ flex: 1, backgroundColor: COLORS.background }}>
@@ -578,12 +582,12 @@ export default function InvoicesScreen() {
       <View style={styles.summaryRow}>
         <View style={styles.summaryItem}>
           <Text style={styles.summaryLabel}>{t('paid')}</Text>
-          <Text style={[styles.summaryValue, { color: COLORS.success }]}>{formatCurrency(totalPaid, currency)}</Text>
+          <Text style={[styles.summaryValue, { color: COLORS.success }]}>{formatCents(totalPaid, currency)}</Text>
         </View>
         <View style={styles.summaryDivider} />
         <View style={styles.summaryItem}>
           <Text style={styles.summaryLabel}>{t('sent')}</Text>
-          <Text style={[styles.summaryValue, { color: COLORS.info }]}>{formatCurrency(totalPending, currency)}</Text>
+          <Text style={[styles.summaryValue, { color: COLORS.info }]}>{formatCents(totalPending, currency)}</Text>
         </View>
         <View style={styles.summaryDivider} />
         <View style={styles.summaryItem}>
@@ -597,7 +601,7 @@ export default function InvoicesScreen() {
         <View style={styles.unpaidBanner}>
           <View>
             <Text style={styles.unpaidCount}>{unpaidCount} {t('unpaid')}</Text>
-            <Text style={styles.unpaidAmt}>{formatCurrency(unpaidTotal, currency)} {t('outstanding')}</Text>
+            <Text style={styles.unpaidAmt}>{formatCents(unpaidTotal, currency)} {t('outstanding')}</Text>
           </View>
           <Pressable onPress={() => setActiveFilter('sent')}>
             <Text style={styles.unpaidLink}>{t('all')} →</Text>
@@ -781,6 +785,9 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       let updated: InvoiceLineItem;
       if (field === 'description' || field === 'period' || field === 'unit' || field === 'discount') {
         updated = { ...li, [field]: value };
+      } else if (field === 'unitPrice') {
+        const num = parseFloat(value.replace(',', '.'));
+        updated = { ...li, unitPriceCents: isNaN(num) ? zeroCents() : toCents(num) };
       } else {
         const num = parseFloat(value.replace(',', '.'));
         updated = { ...li, [field]: isNaN(num) ? 0 : num };
@@ -811,19 +818,19 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
   };
 
   // Totals
-  const netSubtotal = lineItems.reduce((s, li) => s + (li.lineTotal - li.lineVatAmount), 0);
-  const vatTotal = lineItems.reduce((s, li) => s + li.lineVatAmount, 0);
-  const grandTotal = netSubtotal + vatTotal;
+  const netSubtotal = lineItems.reduce((s, li) => addCents(s, subtractCents(li.lineTotalCents, li.lineVatAmountCents)), zeroCents());
+  const vatTotal = lineItems.reduce((s, li) => addCents(s, li.lineVatAmountCents), zeroCents());
+  const grandTotal = addCents(netSubtotal, vatTotal);
   const vatGroups = Object.entries(
     lineItems.reduce((acc, li) => {
-      if (li.lineVatAmount > 0) acc[li.vatPercent] = (acc[li.vatPercent] || 0) + li.lineVatAmount;
+      if (li.lineVatAmountCents > 0) acc[li.vatPercent] = addCents(acc[li.vatPercent] ?? zeroCents(), li.lineVatAmountCents);
       return acc;
-    }, {} as Record<number, number>)
+    }, {} as Record<number, Cents>)
   ).map(([pct, vat]) => ({ pct: Number(pct), vat }));
 
   const handleSave = () => {
     if (!clientName.trim()) { showDialog(t('clientName') + ' required'); return; }
-    if (lineItems.every(li => !li.description.trim() && li.unitPrice === 0)) {
+    if (lineItems.every(li => !li.description.trim() && li.unitPriceCents === zeroCents())) {
       showDialog('Add at least one line item'); return;
     }
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -838,9 +845,9 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       issueDate, dueDate, referenceNumber, paymentTerms,
       vatIncluded: lineItems.some(li => li.vatIncluded ?? false),
       lineItems,
-      amount: netSubtotal,
-      vatAmount: vatTotal,
-      totalAmount: grandTotal,
+      amountCents: netSubtotal,
+      vatAmountCents: vatTotal,
+      totalAmountCents: grandTotal,
       status,
       currency,
       additionalInfo,
@@ -992,8 +999,8 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
           <SectionLabel label={t('lineItems')} />
 
           {lineItems.map((li, idx) => {
-            const lineNet = li.lineTotal - li.lineVatAmount;
-            const discAmt = parseDiscount(li.discount, li.quantity * li.unitPrice);
+            const lineNet = subtractCents(li.lineTotalCents, li.lineVatAmountCents);
+            const discAmt = parseDiscount(li.discount, multiplyCents(li.unitPriceCents, li.quantity));
             return (
               <View key={li.id} style={m.lineCard}>
                 <View style={m.lineCardHeader}>
@@ -1039,10 +1046,10 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                     <Text style={m.lineGridLabel}>{t('unitPrice')}</Text>
                     <TextInput
                       style={m.lineGridInput}
-                      value={rawUnitPrices[li.id] !== undefined ? rawUnitPrices[li.id] : String(li.unitPrice ?? '')}
+                      value={rawUnitPrices[li.id] !== undefined ? rawUnitPrices[li.id] : (li.unitPriceCents ? (li.unitPriceCents / 100).toString() : '')}
                       onChangeText={v => setRawUnitPrices(prev => ({ ...prev, [li.id]: v }))}
                       onBlur={() => {
-                        const raw = rawUnitPrices[li.id] ?? String(li.unitPrice);
+                        const raw = rawUnitPrices[li.id] ?? (li.unitPriceCents / 100).toString();
                         updateLineItem(li.id, 'unitPrice', raw);
                         setRawUnitPrices(prev => { const next = { ...prev }; delete next[li.id]; return next; });
                       }}
@@ -1083,10 +1090,10 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
                   </View>
                 </View>
                 <View style={m.lineTotalsRow}>
-                  <Text style={m.lineTotalsMeta}>{t('net')}: <Text style={{ color: COLORS.text }}>{formatCurrency(lineNet, currency)}</Text></Text>
-                  {discAmt > 0 && <Text style={m.lineTotalsMeta}>{t('discountLabel')}: <Text style={{ color: COLORS.text }}>{formatCurrency(discAmt, currency)}</Text></Text>}
-                  <Text style={m.lineTotalsMeta}>VAT: <Text style={{ color: COLORS.text }}>{formatCurrency(li.lineVatAmount, currency)}</Text></Text>
-                  <Text style={m.lineTotalsTotal}>{formatCurrency(li.lineTotal, currency)}</Text>
+                  <Text style={m.lineTotalsMeta}>{t('net')}: <Text style={{ color: COLORS.text }}>{formatCents(lineNet, currency)}</Text></Text>
+                  {discAmt > 0 && <Text style={m.lineTotalsMeta}>{t('discountLabel')}: <Text style={{ color: COLORS.text }}>{formatCents(discAmt, currency)}</Text></Text>}
+                  <Text style={m.lineTotalsMeta}>VAT: <Text style={{ color: COLORS.text }}>{formatCents(li.lineVatAmountCents, currency)}</Text></Text>
+                  <Text style={m.lineTotalsTotal}>{formatCents(li.lineTotalCents, currency)}</Text>
                 </View>
               </View>
             );
@@ -1112,19 +1119,19 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
           {/* ── 6. TOTALS ── */}
           <SectionLabel label={t('grandTotal')} />
           <View style={m.card}>
-            <View style={m.totalRow}><Text style={m.totalLabel}>{t('subtotal')}</Text><Text style={m.totalVal}>{formatCurrency(netSubtotal, currency)}</Text></View>
+            <View style={m.totalRow}><Text style={m.totalLabel}>{t('subtotal')}</Text><Text style={m.totalVal}>{formatCents(netSubtotal, currency)}</Text></View>
             {vatGroups.map(({ pct, vat }) => (
               <View key={pct} style={m.totalRow}>
                 <Text style={m.totalLabel}>{t('vatGroup')} {pct}%</Text>
-                <Text style={m.totalVal}>{formatCurrency(vat, currency)}</Text>
+                <Text style={m.totalVal}>{formatCents(vat, currency)}</Text>
               </View>
             ))}
-            <View style={m.totalRow}><Text style={m.totalLabel}>{t('vatTotal')}</Text><Text style={m.totalVal}>{formatCurrency(vatTotal, currency)}</Text></View>
+            <View style={m.totalRow}><Text style={m.totalLabel}>{t('vatTotal')}</Text><Text style={m.totalVal}>{formatCents(vatTotal, currency)}</Text></View>
             <View style={m.totalDivider} />
-            <View style={m.totalRow}><Text style={m.grandTotalLabel}>{t('grandTotal')}</Text><Text style={m.grandTotalVal}>{formatCurrency(grandTotal, currency)}</Text></View>
+            <View style={m.totalRow}><Text style={m.grandTotalLabel}>{t('grandTotal')}</Text><Text style={m.grandTotalVal}>{formatCents(grandTotal, currency)}</Text></View>
             <View style={m.amountDue}>
               <Text style={m.amountDueLabel}>Total Amount</Text>
-              <Text style={m.amountDueVal}>{formatCurrency(grandTotal, currency)}</Text>
+              <Text style={m.amountDueVal}>{formatCents(grandTotal, currency)}</Text>
             </View>
           </View>
 
