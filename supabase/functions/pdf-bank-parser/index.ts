@@ -3,6 +3,7 @@
 // Usage: POST with { pdfBase64: string, bankId: 'nordea' | 'op' }
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
+import { corsHeadersFor } from '../_shared/cors.ts';
 
 // Import PDF.js web version (no canvas dependencies)
 import 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
@@ -29,34 +30,27 @@ interface BankParser {
   parse(items: TextItem[]): Transaction[];
 }
 
-// CORS headers
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
-};
-
 // Size limits — defends against memory-exhaustion attacks (audit issue #9).
 // Real bank-statement PDFs are typically <2 MB; 10 MB is a generous ceiling.
 const MAX_PDF_BINARY_BYTES = 10 * 1024 * 1024;
 const MAX_PDF_BASE64_LENGTH = Math.ceil(MAX_PDF_BINARY_BYTES * 4 / 3) + 100;
 const MAX_REQUEST_BODY_BYTES = MAX_PDF_BASE64_LENGTH + 1024; // base64 + JSON envelope
 
-function tooLarge(): Response {
-  return new Response(
-    JSON.stringify({ error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.` }),
-    { status: 413, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
-  );
-}
-
 serve(async (req: Request) => {
+  const corsHeaders = corsHeadersFor(req.headers.get('origin'));
+  const tooLarge = (): Response =>
+    new Response(
+      JSON.stringify({ error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.` }),
+      { status: 413, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS_HEADERS });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   if (req.method !== 'POST') {
-    return new Response('Method not allowed', { status: 405, headers: CORS_HEADERS });
+    return new Response('Method not allowed', { status: 405, headers: corsHeaders });
   }
 
   // Pre-parse defense: reject if Content-Length signals an oversized body
@@ -73,7 +67,7 @@ serve(async (req: Request) => {
     if (!pdfBase64) {
       return new Response(
         JSON.stringify({ error: 'Missing pdfBase64 field' }),
-        { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -84,7 +78,7 @@ serve(async (req: Request) => {
     if (!bankId || !['nordea', 'op'].includes(bankId)) {
       return new Response(
         JSON.stringify({ error: 'bankId must be "nordea" or "op"' }),
-        { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -107,7 +101,7 @@ serve(async (req: Request) => {
           error: 'No structured text found - PDF may be scanned/image-based',
           fallback_suggestion: 'google_vision_ocr'
         }),
-        { status: 200, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+        { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
 
@@ -129,7 +123,7 @@ serve(async (req: Request) => {
       }),
       {
         status: 200,
-        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       }
     );
 
@@ -142,7 +136,7 @@ serve(async (req: Request) => {
       }),
       {
         status: 500,
-        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       }
     );
   }

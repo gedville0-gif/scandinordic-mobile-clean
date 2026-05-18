@@ -17,12 +17,8 @@
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
+import { corsHeadersFor } from '../_shared/cors.ts';
+import { checkRateLimit } from '../_shared/rateLimit.ts';
 
 const USER_OWNED_TABLES: Array<{ name: string; idColumn: string }> = [
   { name: 'transactions',     idColumn: 'user_id' },
@@ -48,7 +44,14 @@ interface ExportPayload {
 }
 
 serve(async (req: Request) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS_HEADERS });
+  const corsHeaders = corsHeadersFor(req.headers.get('origin'));
+  const json = (data: unknown, status = 200): Response =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST')    return json({ error: 'Method not allowed' }, 405);
 
   const authHeader = req.headers.get('Authorization');
@@ -70,6 +73,20 @@ serve(async (req: Request) => {
   if (authError || !user) return json({ error: 'Unauthorized' }, 401);
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey);
+
+  // ── Rate limit: 20 export requests per hour per user. Reads the entire
+  // dataset, so we limit it more strictly than typical reads.
+  const rl = await checkRateLimit(adminClient, user.id, {
+    endpoint: 'export-data',
+    windowMs: 60 * 60 * 1000,
+    maxRequests: 20,
+  });
+  if (!rl.ok) {
+    return new Response(
+      JSON.stringify({ error: 'Rate limit exceeded. Try again later.', retryAfterSeconds: rl.retryAfterSeconds }),
+      { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSeconds) } },
+    );
+  }
 
   // ── Build the export payload.
   const payload: ExportPayload = {
@@ -114,9 +131,3 @@ serve(async (req: Request) => {
   return json(payload);
 });
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-  });
-}

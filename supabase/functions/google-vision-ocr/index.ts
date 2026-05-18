@@ -3,15 +3,12 @@
 // Usage: POST { image: base64_pdf_string, type: 'bank_statement' }
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { corsHeadersFor } from '../_shared/cors.ts';
+import { checkRateLimit } from '../_shared/rateLimit.ts';
 
 const GOOGLE_API_KEY = Deno.env.get('GOOGLE_VISION_API_KEY') ?? '';
 const VISION_URL = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_API_KEY}`;
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
-};
 
 // Size limits — defends against memory-exhaustion attacks (audit issue #9).
 // Google Vision rejects images >20 MB anyway; we cap earlier to save bandwidth
@@ -27,9 +24,16 @@ interface Transaction {
 }
 
 serve(async (req: Request) => {
+  const corsHeaders = corsHeadersFor(req.headers.get('origin'));
+  const json = (data: any, status: number = 200): Response =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS_HEADERS });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   if (req.method !== 'POST') {
@@ -40,6 +44,38 @@ serve(async (req: Request) => {
   const declaredSize = parseInt(req.headers.get('content-length') ?? '0', 10);
   if (declaredSize > MAX_REQUEST_BODY_BYTES) {
     return json({ error: `Image too large. Maximum ${MAX_IMAGE_BINARY_BYTES / (1024 * 1024)} MB.` }, 413);
+  }
+
+  // ── Authenticate the caller via their JWT (audit issue #8).
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) return json({ error: 'Missing Authorization header' }, 401);
+
+  const supabaseUrl    = Deno.env.get('SUPABASE_URL')      ?? '';
+  const anonKey        = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY')  ?? '';
+
+  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+    return json({ error: 'Server misconfigured' }, 500);
+  }
+
+  const authClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user }, error: authError } = await authClient.auth.getUser();
+  if (authError || !user) return json({ error: 'Unauthorized' }, 401);
+
+  // ── Rate limit: 60 OCR calls per hour per user (protects Google Vision quota).
+  const adminClient = createClient(supabaseUrl, serviceRoleKey);
+  const rl = await checkRateLimit(adminClient, user.id, {
+    endpoint: 'google-vision-ocr',
+    windowMs: 60 * 60 * 1000,
+    maxRequests: 60,
+  });
+  if (!rl.ok) {
+    return new Response(
+      JSON.stringify({ error: 'Rate limit exceeded. Try again later.', retryAfterSeconds: rl.retryAfterSeconds }),
+      { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSeconds) } },
+    );
   }
 
   try {
@@ -360,10 +396,3 @@ function parseAlvBreakdown(text: string): { vatRate: number; grossAmount: number
   return [];
 }
 
-// JSON response helper
-function json(data: any, status: number = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-  });
-}

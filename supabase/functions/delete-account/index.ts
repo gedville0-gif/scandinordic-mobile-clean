@@ -19,12 +19,8 @@
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
+import { corsHeadersFor } from '../_shared/cors.ts';
+import { checkRateLimit } from '../_shared/rateLimit.ts';
 
 // Tables that may contain rows owned by the user. Each is filtered by user_id
 // (or `id` for profiles). Missing tables are silently skipped (42P01).
@@ -40,7 +36,14 @@ const USER_OWNED_TABLES: Array<{ name: string; idColumn: string }> = [
 ];
 
 serve(async (req: Request) => {
-  if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS_HEADERS });
+  const corsHeaders = corsHeadersFor(req.headers.get('origin'));
+  const json = (data: unknown, status = 200): Response =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (req.method !== 'POST')    return json({ error: 'Method not allowed' }, 405);
 
   const authHeader = req.headers.get('Authorization');
@@ -65,6 +68,21 @@ serve(async (req: Request) => {
 
   // ── Step 2: Service-role client for the destructive operations.
   const adminClient = createClient(supabaseUrl, serviceRoleKey);
+
+  // ── Step 2b: Rate limit — 5 delete attempts per minute per user. This is
+  // a destructive op, so the limit is tight; the only legitimate retry case
+  // is a failed first attempt followed by a quick retry.
+  const rl = await checkRateLimit(adminClient, userId, {
+    endpoint: 'delete-account',
+    windowMs: 60 * 1000,
+    maxRequests: 5,
+  });
+  if (!rl.ok) {
+    return new Response(
+      JSON.stringify({ error: 'Rate limit exceeded. Try again later.', retryAfterSeconds: rl.retryAfterSeconds }),
+      { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSeconds) } },
+    );
+  }
 
   // ── Step 3: Collect storage filenames before deleting transactions.
   // The receipts bucket is keyed by filename (not user_id), so the only way to
@@ -136,9 +154,3 @@ serve(async (req: Request) => {
   });
 });
 
-function json(data: unknown, status = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-  });
-}

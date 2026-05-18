@@ -3,12 +3,7 @@
 // Usage: POST { pdfBase64: string }
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS'
-};
+import { corsHeadersFor } from '../_shared/cors.ts';
 
 // Size limits — defends against memory-exhaustion attacks (audit issue #9).
 const MAX_PDF_BINARY_BYTES = 10 * 1024 * 1024;
@@ -23,9 +18,16 @@ interface PdfToImagesResponse {
 }
 
 serve(async (req: Request) => {
+  const corsHeaders = corsHeadersFor(req.headers.get('origin'));
+  const json = (data: any, status: number = 200): Response =>
+    new Response(JSON.stringify(data), {
+      status,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    });
+
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS_HEADERS });
+    return new Response('ok', { headers: corsHeaders });
   }
 
   if (req.method !== 'POST') {
@@ -79,11 +81,3 @@ serve(async (req: Request) => {
     }, 500);
   }
 });
-
-// JSON response helper
-function json(data: any, status: number = 200): Response {
-  return new Response(JSON.stringify(data), {
-    status,
-    headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' }
-  });
-}
