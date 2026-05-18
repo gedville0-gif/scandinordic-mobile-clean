@@ -11,10 +11,11 @@ import { InvoiceCard } from '@/components/InvoiceCard';
 import { getInvoices, saveInvoice, deleteInvoice, getSettings } from '@/lib/storage';
 import type { Invoice, InvoiceLineItem, Settings, Currency } from '@/lib/types';
 import { useLanguage } from '@/contexts/LanguageContext';
-import { formatCents, addCents, subtractCents, multiplyCents, toCents, zeroCents, computeVatFromGross, computeVatFromNet, type Cents } from '@/lib/money';
+import { formatCents, addCents, subtractCents, multiplyCents, toCents, zeroCents, computeVatFromGross, computeVatFromNet, fromMinorUnit, type Cents } from '@/lib/money';
 import { useAppDialog } from '@/components/AppDialog';
 import DatePickerModal from '@/components/DatePickerModal';
 import { useAnalytics } from '@/lib/analytics';
+import { supabase } from '@/lib/supabase';
 
 const VAT_PRESETS = [0, 13.5, 14, 25.5];
 const PAYMENT_TERMS = ['Due on Receipt', 'Net 7', 'Net 14', 'Net 30'];
@@ -843,11 +844,35 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
     }, {} as Record<number, Cents>)
   ).map(([pct, vat]) => ({ pct: Number(pct), vat }));
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!clientName.trim()) { showDialog(t('clientName') + ' required'); return; }
     if (lineItems.every(li => !li.description.trim() && li.unitPriceCents === zeroCents())) {
       showDialog('Add at least one line item'); return;
     }
+
+    // Audit issue #3 — totals computed server-side. v1 function expects a
+    // single VAT rate per invoice; we send the first line's rate as canonical.
+    // Mixed-rate invoices: server aggregates will use this rate; line-level
+    // breakdown stays for display only until v2 supports per-line rates.
+    const canonicalVatRate = lineItems[0]?.vatPercent ?? 25.5;
+    const { data: totals, error: totalsError } = await supabase.functions.invoke(
+      'compute-invoice-totals',
+      {
+        body: {
+          line_items: lineItems.map(li => ({
+            description: li.description,
+            quantity: li.quantity,
+            unit_price_cents: li.unitPriceCents,
+          })),
+          vat_rate: canonicalVatRate,
+        },
+      },
+    );
+    if (totalsError || !totals) {
+      showDialog('Could not compute totals', totalsError?.message ?? 'Unknown error');
+      return;
+    }
+
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     const inv: Invoice = {
       id: initialInvoice?.id ?? genId(),
@@ -860,9 +885,9 @@ function AddInvoiceModal({ visible, onClose, onSave, t, currency, settings, invo
       issueDate, dueDate, referenceNumber, paymentTerms,
       vatIncluded: lineItems.some(li => li.vatIncluded ?? false),
       lineItems,
-      amountCents: netSubtotal,
-      vatAmountCents: vatTotal,
-      totalAmountCents: grandTotal,
+      amountCents: fromMinorUnit(totals.subtotal_cents),
+      vatAmountCents: fromMinorUnit(totals.vat_cents),
+      totalAmountCents: fromMinorUnit(totals.total_cents),
       status,
       currency,
       additionalInfo,
