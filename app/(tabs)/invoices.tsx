@@ -14,6 +14,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { formatCents, addCents, subtractCents, multiplyCents, toCents, zeroCents, computeVatFromGross, computeVatFromNet, type Cents } from '@/lib/money';
 import { useAppDialog } from '@/components/AppDialog';
 import DatePickerModal from '@/components/DatePickerModal';
+import { useAnalytics } from '@/lib/analytics';
 
 const VAT_PRESETS = [0, 13.5, 14, 25.5];
 const PAYMENT_TERMS = ['Due on Receipt', 'Net 7', 'Net 14', 'Net 30'];
@@ -495,6 +496,7 @@ export default function InvoicesScreen() {
   const [editInvoice, setEditInvoice] = useState<Invoice | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [activeFilter, setActiveFilter] = useState<Invoice['status'] | 'all'>('all');
+  const { track } = useAnalytics();
 
   const load = useCallback(async () => {
     const [inv, s] = await Promise.all([getInvoices(), getSettings()]);
@@ -663,7 +665,20 @@ export default function InvoicesScreen() {
       <AddInvoiceModal
         visible={showModal}
         onClose={() => { setShowModal(false); setEditInvoice(null); }}
-        onSave={async (inv) => { await saveInvoice(inv); await load(); }}
+        onSave={async (inv) => {
+          const isNew = !editInvoice;
+          await saveInvoice(inv);
+          if (isNew) {
+            track('invoice_created', {
+              currency: inv.currency,
+              total_amount_cents: inv.totalAmountCents,
+              vat_amount_cents: inv.vatAmountCents,
+              line_item_count: inv.lineItems?.length ?? 0,
+              status: inv.status,
+            });
+          }
+          await load();
+        }}
         t={t}
         currency={currency}
         settings={settings}

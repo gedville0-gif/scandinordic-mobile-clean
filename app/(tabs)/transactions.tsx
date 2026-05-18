@@ -21,6 +21,7 @@ import { useAppDialog } from '@/components/AppDialog';
 import DatePickerModal from '@/components/DatePickerModal';
 import { PDFReviewModal } from '@/components/PDFReviewModal';
 import { supabase } from '@/lib/supabase';
+import { useAnalytics } from '@/lib/analytics';
 import { decode } from 'base64-arraybuffer';
 import * as FileSystem from 'expo-file-system/legacy';
 
@@ -480,6 +481,7 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
   const modalStyles = makeModalStyles();
   const insets = useSafeAreaInsets();
   const { show: showDialog, dialog } = useAppDialog();
+  const { track } = useAnalytics();
   const [desc, setDesc] = useState('');
   const [amount, setAmount] = useState('');
   const [category, setCategory] = useState('other');
@@ -586,6 +588,12 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
           setVatRows([{ id: generateId(), rowAmt: detectedAmt, vatPct: detectedVat }]);
         }
         setConfidence(result?.confidence ?? null);
+        track('receipt_scanned', {
+          confidence: result?.confidence ?? null,
+          vat_row_count: breakdown.length,
+          amount_detected: amount !== null && amount !== undefined,
+          merchant_detected: !!merchant,
+        });
       })
       .catch((err: Error) => {
         if (cancelled) return;
@@ -622,6 +630,10 @@ function ReceiptReviewModal({ visible, imageUri, imageBase64, onClose, onSave, t
         if (!uploadError) {
           const { data: urlData } = supabase.storage.from('receipts').getPublicUrl(filename);
           receipt_url = urlData?.publicUrl;
+          track('receipt_uploaded', {
+            mime_type: 'image/jpeg',
+            size_kb: Math.round(base64.length * 3 / 4 / 1024),
+          });
         } else {
           console.log('⚠️ Receipt upload failed:', uploadError.message);
         }
@@ -911,6 +923,7 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
   const csvStyles = makeCsvStyles();
   const insets = useSafeAreaInsets();
   const { show: showDialog, dialog: csvDialog } = useAppDialog();
+  const { track } = useAnalytics();
   const [step, setStep] = useState<CsvStep>('idle');
   const [rows, setRows] = useState<Record<string, string>[]>([]);
   const [headers, setHeaders] = useState<string[]>([]);        // raw CSV keys
@@ -1362,7 +1375,11 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
       visible={reviewTxs !== null}
       transactions={reviewTxs ?? []}
       currency={currency}
-      onConfirm={(confirmed) => { onBulkSave(confirmed); onClose(); }}
+      onConfirm={(confirmed) => {
+        track('transaction_imported', { source: 'pdf', count: confirmed.length });
+        onBulkSave(confirmed);
+        onClose();
+      }}
       onCancel={() => setReviewTxs(null)}
     />
     </>

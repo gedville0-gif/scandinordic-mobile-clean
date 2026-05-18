@@ -3,6 +3,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { makeRedirectUri } from 'expo-auth-session';
 import { router } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { usePostHog } from 'posthog-react-native';
 import { supabase } from '../lib/supabase';
 import { setCurrentUserId } from '../lib/session';
 import type { User, Session } from '@supabase/supabase-js';
@@ -25,6 +26,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  // undefined when EXPO_PUBLIC_POSTHOG_KEY is unset — provider is skipped in _layout.tsx.
+  const posthog = usePostHog();
 
   useEffect(() => {
     const timeout = setTimeout(() => {
@@ -70,6 +73,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setSession(session);
         setUser(session?.user ?? null);
         setLoading(false);
+        if (session?.user) {
+          // identify by Supabase UUID only; calling with the same id is a no-op on the wire.
+          posthog?.identify(session.user.id);
+        } else if (event === 'SIGNED_OUT') {
+          posthog?.reset();
+        }
         if (event === 'SIGNED_OUT') {
           router.replace('/(auth)/login');
         }
