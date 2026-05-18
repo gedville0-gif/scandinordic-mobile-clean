@@ -6,6 +6,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { usePostHog } from 'posthog-react-native';
 import { supabase } from '../lib/supabase';
 import { setCurrentUserId } from '../lib/session';
+import { registerForPushNotifications } from '../lib/notifications';
 import type { User, Session } from '@supabase/supabase-js';
 
 WebBrowser.maybeCompleteAuthSession();
@@ -76,6 +77,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (session?.user) {
           // identify by Supabase UUID only; calling with the same id is a no-op on the wire.
           posthog?.identify(session.user.id);
+          if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+            registerForPushNotifications().catch(err =>
+              console.error('[auth] push registration failed:', err?.message ?? err),
+            );
+          }
         } else if (event === 'SIGNED_OUT') {
           posthog?.reset();
         }
