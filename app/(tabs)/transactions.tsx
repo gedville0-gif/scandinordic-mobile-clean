@@ -1033,12 +1033,17 @@ function CsvImportModal({ visible, type, onClose, onBulkSave, t }: CsvImportModa
         bankId = 'op';
       }
 
-      // Call PDF parser service
+      // Call PDF parser service — auth via Supabase JWT (audit issue #4).
+      const { data: { session: parseSession } } = await supabase.auth.getSession();
+      const accessToken = parseSession?.access_token;
+      if (!accessToken) {
+        throw new Error('Not signed in');
+      }
       const parseResponse = await fetch('https://scandinordic-mobile-clean-production.up.railway.app/parse', { // Change after Railway deployment
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Parser-Secret': process.env.EXPO_PUBLIC_PARSER_SECRET ?? ''
+          'Authorization': `Bearer ${accessToken}`,
         },
         body: JSON.stringify({
           pdf: pdfBase64,
