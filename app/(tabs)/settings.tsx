@@ -21,6 +21,12 @@ import { useLanguage } from '@/contexts/LanguageContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useAppDialog } from '@/components/AppDialog';
+import {
+  sendAccountantInvite,
+  getMyAccountants,
+  removeAccountant,
+  type AccountantInviteRow,
+} from '@/lib/accountant-supabase';
 
 // Dynamic imports — same pattern as other screens. Allow graceful degradation
 // on environments where these native modules aren't available.
@@ -63,13 +69,47 @@ export default function SettingsScreen() {
   const [langOpen, setLangOpen] = useState(false);
   const [curOpen, setCurOpen] = useState(false);
 
+  const [accountants, setAccountants] = useState<AccountantInviteRow[]>([]);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [sendingInvite, setSendingInvite] = useState(false);
+
   const load = useCallback(async () => {
-    const s = await getSettings();
+    const [s, a] = await Promise.all([getSettings(), getMyAccountants()]);
     setSettings(s);
     setDraft(s);
+    setAccountants(a);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  const handleSendInvite = async () => {
+    const email = inviteEmail.trim();
+    if (!email.includes('@')) {
+      showDialog(t('invalidEmail'), email);
+      return;
+    }
+    setSendingInvite(true);
+    try {
+      await sendAccountantInvite(email);
+      setInviteEmail('');
+      const a = await getMyAccountants();
+      setAccountants(a);
+      showDialog(t('inviteSent'), email);
+    } catch (e: any) {
+      showDialog(t('inviteAccountant'), e?.message ?? 'Failed');
+    } finally {
+      setSendingInvite(false);
+    }
+  };
+
+  const handleRemoveAccountant = async (id: string) => {
+    try {
+      await removeAccountant(id);
+      setAccountants(prev => prev.filter(a => a.id !== id));
+    } catch (e: any) {
+      showDialog(t('accountants'), e?.message ?? 'Failed');
+    }
+  };
 
   const patchDraft = (patch: Partial<Settings>) => {
     setDraft(d => ({ ...(d ?? {} as Settings), ...patch }));
@@ -363,6 +403,55 @@ export default function SettingsScreen() {
           </View>
           <Feather name="chevron-right" size={16} color={COLORS.muted} />
         </Pressable>
+      </View>
+
+      {/* Accountants */}
+      <View style={styles.card}>
+        <View style={styles.cardHeader}>
+          <Text style={styles.sectionLabel}>{t('accountants')}</Text>
+        </View>
+        <View style={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, flexDirection: 'row', gap: 8 }}>
+          <TextInput
+            style={[styles.input, { flex: 1, marginVertical: 0 }]}
+            value={inviteEmail}
+            onChangeText={setInviteEmail}
+            placeholder={t('accountantEmail')}
+            placeholderTextColor={COLORS.muted}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+            editable={!sendingInvite}
+          />
+          <Pressable
+            style={[styles.managePlanBtn, { opacity: sendingInvite || !inviteEmail.trim() ? 0.4 : 1 }]}
+            onPress={handleSendInvite}
+            disabled={sendingInvite || !inviteEmail.trim()}
+          >
+            {sendingInvite
+              ? <ActivityIndicator size="small" color={COLORS.primary} />
+              : <Text style={styles.managePlanText}>{t('sendInvite')}</Text>}
+          </Pressable>
+        </View>
+        {accountants.length === 0 ? (
+          <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+            <Text style={{ color: COLORS.muted, fontSize: 13 }}>{t('noAccountantsYet')}</Text>
+          </View>
+        ) : (
+          accountants.map((a, i) => (
+            <View
+              key={a.id}
+              style={[
+                styles.row,
+                { borderBottomColor: i < accountants.length - 1 ? COLORS.border : 'transparent' },
+              ]}
+            >
+              <Text style={styles.rowLabel}>{a.accountant_email}</Text>
+              <Pressable onPress={() => handleRemoveAccountant(a.id)}>
+                <Feather name="x" size={16} color={COLORS.danger} />
+              </Pressable>
+            </View>
+          ))
+        )}
       </View>
 
       {/* Plan */}
