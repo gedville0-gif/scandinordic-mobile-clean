@@ -3,7 +3,9 @@
 // Usage: POST { pdfBase64: string }
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeadersFor } from '../_shared/cors.ts';
+import { checkRateLimit } from '../_shared/rateLimit.ts';
 
 // Size limits — defends against memory-exhaustion attacks (audit issue #9).
 const MAX_PDF_BINARY_BYTES = 10 * 1024 * 1024;
@@ -38,6 +40,38 @@ serve(async (req: Request) => {
   const declaredSize = parseInt(req.headers.get('content-length') ?? '0', 10);
   if (declaredSize > MAX_REQUEST_BODY_BYTES) {
     return json({ success: false, error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.` }, 413);
+  }
+
+  // ── Authenticate the caller via their JWT (audit issue #8).
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) return json({ success: false, error: 'Missing Authorization header' }, 401);
+
+  const supabaseUrl    = Deno.env.get('SUPABASE_URL')      ?? '';
+  const anonKey        = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY')  ?? '';
+
+  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+    return json({ success: false, error: 'Server misconfigured' }, 500);
+  }
+
+  const authClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user }, error: authError } = await authClient.auth.getUser();
+  if (authError || !user) return json({ success: false, error: 'Unauthorized' }, 401);
+
+  // ── Rate limit: 60 PDF conversions per hour per user.
+  const adminClient = createClient(supabaseUrl, serviceRoleKey);
+  const rl = await checkRateLimit(adminClient, user.id, {
+    endpoint: 'pdf-to-images',
+    windowMs: 60 * 60 * 1000,
+    maxRequests: 60,
+  });
+  if (!rl.ok) {
+    return new Response(
+      JSON.stringify({ success: false, error: 'Rate limit exceeded. Try again later.', retryAfterSeconds: rl.retryAfterSeconds }),
+      { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSeconds) } },
+    );
   }
 
   try {

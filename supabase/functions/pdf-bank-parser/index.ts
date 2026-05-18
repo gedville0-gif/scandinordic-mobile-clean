@@ -3,7 +3,9 @@
 // Usage: POST with { pdfBase64: string, bankId: 'nordea' | 'op' }
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { corsHeadersFor } from '../_shared/cors.ts';
+import { checkRateLimit } from '../_shared/rateLimit.ts';
 
 // Import PDF.js web version (no canvas dependencies)
 import 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js';
@@ -57,6 +59,51 @@ serve(async (req: Request) => {
   // before we buffer it into memory.
   const declaredSize = parseInt(req.headers.get('content-length') ?? '0', 10);
   if (declaredSize > MAX_REQUEST_BODY_BYTES) return tooLarge();
+
+  // ── Authenticate the caller via their JWT (audit issue #8).
+  const authHeader = req.headers.get('Authorization');
+  if (!authHeader) {
+    return new Response(
+      JSON.stringify({ error: 'Missing Authorization header' }),
+      { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const supabaseUrl    = Deno.env.get('SUPABASE_URL')      ?? '';
+  const anonKey        = Deno.env.get('SUPABASE_ANON_KEY') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY')  ?? '';
+
+  if (!supabaseUrl || !anonKey || !serviceRoleKey) {
+    return new Response(
+      JSON.stringify({ error: 'Server misconfigured' }),
+      { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  const authClient = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  });
+  const { data: { user }, error: authError } = await authClient.auth.getUser();
+  if (authError || !user) {
+    return new Response(
+      JSON.stringify({ error: 'Unauthorized' }),
+      { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
+    );
+  }
+
+  // ── Rate limit: 60 PDF parses per hour per user.
+  const adminClient = createClient(supabaseUrl, serviceRoleKey);
+  const rl = await checkRateLimit(adminClient, user.id, {
+    endpoint: 'pdf-bank-parser',
+    windowMs: 60 * 60 * 1000,
+    maxRequests: 60,
+  });
+  if (!rl.ok) {
+    return new Response(
+      JSON.stringify({ error: 'Rate limit exceeded. Try again later.', retryAfterSeconds: rl.retryAfterSeconds }),
+      { status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(rl.retryAfterSeconds) } },
+    );
+  }
 
   try {
     const { pdfBase64, bankId } = await req.json() as {
