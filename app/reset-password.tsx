@@ -6,8 +6,7 @@ import {
 import { Feather } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
-import * as Linking from 'expo-linking';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import { COLORS } from '@/constants/colors';
 import { supabase } from '@/lib/supabase';
 import { useLanguage } from '@/contexts/LanguageContext';
@@ -15,6 +14,7 @@ import { useLanguage } from '@/contexts/LanguageContext';
 export default function ResetPasswordScreen() {
   const insets = useSafeAreaInsets();
   const { t } = useLanguage();
+  const params = useLocalSearchParams<{ code?: string; error?: string; error_description?: string }>();
   const [sessionReady, setSessionReady] = useState(false);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
@@ -26,38 +26,28 @@ export default function ResetPasswordScreen() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Extract tokens from the deep link URL fragment
-    Linking.getInitialURL().then(async (url) => {
-      if (!url) {
-        setSessionError('No reset link detected.');
-        return;
-      }
-      const accessToken  = url.match(/[#&?]access_token=([^&]+)/)?.[1];
-      const refreshToken = url.match(/[#&?]refresh_token=([^&]+)/)?.[1];
-      const type         = url.match(/[#&?]type=([^&]+)/)?.[1];
-
-      if (!accessToken || !refreshToken) {
-        setSessionError('Invalid or expired reset link. Please request a new one.');
-        return;
-      }
-
-      if (type !== 'recovery') {
-        setSessionError('This link is not a password reset link.');
-        return;
-      }
-
-      const { error: err } = await supabase.auth.setSession({
-        access_token: decodeURIComponent(accessToken),
-        refresh_token: decodeURIComponent(refreshToken),
-      });
-
+    // Supabase PKCE recovery flow: the email link contains ?code=<one-time>.
+    // The code is bound to THIS device via a code_verifier that was stored in
+    // SecureStore when forgot-password.tsx called resetPasswordForEmail.
+    // A phishing link delivered to a different device CANNOT complete the
+    // exchange — that's the CSRF protection that the old setSession({access_token,
+    // refresh_token}) flow lacked (audit issue #10).
+    if (params.error || params.error_description) {
+      setSessionError(params.error_description || params.error || 'Reset link error');
+      return;
+    }
+    if (!params.code) {
+      setSessionError('Invalid or expired reset link. Please request a new one.');
+      return;
+    }
+    supabase.auth.exchangeCodeForSession(params.code).then(({ error: err }) => {
       if (err) {
         setSessionError(err.message);
       } else {
         setSessionReady(true);
       }
     });
-  }, []);
+  }, [params.code, params.error, params.error_description]);
 
   const handleUpdate = async () => {
     if (newPassword.length < 6) {

@@ -7,10 +7,13 @@
 // Deploy: supabase functions deploy export-data
 //
 // Required env vars (set in Supabase Dashboard → Edge Function secrets):
-//   SUPABASE_URL                — auto-injected
-//   SUPABASE_ANON_KEY           — auto-injected (used only to verify caller JWT)
-//   SUPABASE_SERVICE_ROLE_KEY   — MUST be set manually; allows reading all the
-//                                 user's data regardless of RLS
+//   SUPABASE_URL       — auto-injected
+//   SUPABASE_ANON_KEY  — auto-injected (used only to verify caller JWT)
+//   SERVICE_ROLE_KEY   — MUST be set manually; allows reading all the user's
+//                        data regardless of RLS. Supabase blocks secret names
+//                        starting with SUPABASE_, so the conventional
+//                        `SUPABASE_SERVICE_ROLE_KEY` cannot be used here —
+//                        store the service-role key under this unprefixed name.
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -53,7 +56,7 @@ serve(async (req: Request) => {
 
   const supabaseUrl    = Deno.env.get('SUPABASE_URL')              ?? '';
   const anonKey        = Deno.env.get('SUPABASE_ANON_KEY')         ?? '';
-  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  const serviceRoleKey = Deno.env.get('SERVICE_ROLE_KEY') ?? '';
 
   if (!supabaseUrl || !anonKey || !serviceRoleKey) {
     return json({ error: 'Server misconfigured' }, 500);

@@ -46,5 +46,10 @@ export const supabase = createClient(SUPABASE_URL, safeKey, {
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: false,
+    // PKCE binds OAuth and password-reset flows to the device that initiated
+    // them (via a code_verifier stored locally). Without PKCE, an attacker who
+    // intercepts or phishes a recovery link can hijack the session on their
+    // device. With PKCE, only the originating device can complete the exchange.
+    flowType: 'pkce',
   },
 });

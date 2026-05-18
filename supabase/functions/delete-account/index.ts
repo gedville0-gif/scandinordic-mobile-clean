@@ -9,9 +9,13 @@
 // Deploy: supabase functions deploy delete-account
 //
 // Required env vars (set in Supabase Dashboard → Edge Function secrets):
-//   SUPABASE_URL                — auto-injected
-//   SUPABASE_ANON_KEY           — auto-injected (used only to verify the caller's JWT)
-//   SUPABASE_SERVICE_ROLE_KEY   — MUST be set manually; bypasses RLS for the cascade
+//   SUPABASE_URL       — auto-injected
+//   SUPABASE_ANON_KEY  — auto-injected (used only to verify the caller's JWT)
+//   SERVICE_ROLE_KEY   — MUST be set manually; bypasses RLS for the cascade.
+//                        Supabase blocks secret names starting with SUPABASE_,
+//                        so the conventional `SUPABASE_SERVICE_ROLE_KEY` cannot
+//                        be used here — store the service-role key under this
+//                        unprefixed name instead.
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -44,7 +48,7 @@ serve(async (req: Request) => {
 
   const supabaseUrl     = Deno.env.get('SUPABASE_URL')              ?? '';
   const anonKey         = Deno.env.get('SUPABASE_ANON_KEY')         ?? '';
-  const serviceRoleKey  = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '';
+  const serviceRoleKey  = Deno.env.get('SERVICE_ROLE_KEY') ?? '';
 
   if (!supabaseUrl || !anonKey || !serviceRoleKey) {
     return json({ error: 'Server misconfigured' }, 500);
