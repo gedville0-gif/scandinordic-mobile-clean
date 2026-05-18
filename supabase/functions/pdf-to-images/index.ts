@@ -10,6 +10,11 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// Size limits — defends against memory-exhaustion attacks (audit issue #9).
+const MAX_PDF_BINARY_BYTES = 10 * 1024 * 1024;
+const MAX_PDF_BASE64_LENGTH = Math.ceil(MAX_PDF_BINARY_BYTES * 4 / 3) + 100;
+const MAX_REQUEST_BODY_BYTES = MAX_PDF_BASE64_LENGTH + 1024;
+
 interface PdfToImagesResponse {
   success: boolean;
   images?: string[]; // base64 PNG images
@@ -27,6 +32,12 @@ serve(async (req: Request) => {
     return json({ success: false, error: 'Method not allowed' }, 405);
   }
 
+  // Pre-parse defense: reject oversized bodies before buffering them.
+  const declaredSize = parseInt(req.headers.get('content-length') ?? '0', 10);
+  if (declaredSize > MAX_REQUEST_BODY_BYTES) {
+    return json({ success: false, error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.` }, 413);
+  }
+
   try {
     console.log('🔄 Processing PDF to images conversion...');
 
@@ -35,6 +46,10 @@ serve(async (req: Request) => {
     if (!pdfBase64) {
       console.error('❌ Missing pdfBase64 field');
       return json({ success: false, error: 'Missing pdfBase64 field' }, 400);
+    }
+
+    if (pdfBase64.length > MAX_PDF_BASE64_LENGTH) {
+      return json({ success: false, error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.` }, 413);
     }
 
     // Validate PDF format

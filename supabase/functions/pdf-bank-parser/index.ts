@@ -36,6 +36,19 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// Size limits — defends against memory-exhaustion attacks (audit issue #9).
+// Real bank-statement PDFs are typically <2 MB; 10 MB is a generous ceiling.
+const MAX_PDF_BINARY_BYTES = 10 * 1024 * 1024;
+const MAX_PDF_BASE64_LENGTH = Math.ceil(MAX_PDF_BINARY_BYTES * 4 / 3) + 100;
+const MAX_REQUEST_BODY_BYTES = MAX_PDF_BASE64_LENGTH + 1024; // base64 + JSON envelope
+
+function tooLarge(): Response {
+  return new Response(
+    JSON.stringify({ error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.` }),
+    { status: 413, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
+  );
+}
+
 serve(async (req: Request) => {
   // Handle CORS preflight
   if (req.method === 'OPTIONS') {
@@ -45,6 +58,11 @@ serve(async (req: Request) => {
   if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405, headers: CORS_HEADERS });
   }
+
+  // Pre-parse defense: reject if Content-Length signals an oversized body
+  // before we buffer it into memory.
+  const declaredSize = parseInt(req.headers.get('content-length') ?? '0', 10);
+  if (declaredSize > MAX_REQUEST_BODY_BYTES) return tooLarge();
 
   try {
     const { pdfBase64, bankId } = await req.json() as {
@@ -58,6 +76,10 @@ serve(async (req: Request) => {
         { status: 400, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } }
       );
     }
+
+    // Post-parse defense: even if Content-Length lied, the actual base64
+    // string can't exceed our limit.
+    if (pdfBase64.length > MAX_PDF_BASE64_LENGTH) return tooLarge();
 
     if (!bankId || !['nordea', 'op'].includes(bankId)) {
       return new Response(

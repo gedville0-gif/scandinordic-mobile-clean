@@ -9,11 +9,19 @@ const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const PARSER_SECRET = process.env.PARSER_SECRET || 'default-secret';
 
+// Size limits — defends against memory-exhaustion attacks (audit issue #9).
+// Real bank-statement PDFs are typically <2 MB; 10 MB is a generous ceiling.
+const MAX_PDF_BINARY_BYTES = 10 * 1024 * 1024;
+const MAX_PDF_BASE64_LENGTH = Math.ceil(MAX_PDF_BINARY_BYTES * 4 / 3) + 100;
+// Express body limit must accommodate the base64 string + JSON envelope.
+// Was '50mb' — comically high and the documented attack vector.
+const EXPRESS_BODY_LIMIT = '14mb';
+
 // Middleware
 app.use(helmet());
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: EXPRESS_BODY_LIMIT }));
+app.use(express.urlencoded({ extended: true, limit: EXPRESS_BODY_LIMIT }));
 
 // Auth middleware
 const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -50,6 +58,15 @@ app.post('/parse', requireAuth, async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'Missing or invalid pdf field (must be base64 string)'
+      });
+    }
+
+    // Defense-in-depth: even if Express body limit was bypassed somehow,
+    // reject oversized base64 strings explicitly.
+    if (pdf.length > MAX_PDF_BASE64_LENGTH) {
+      return res.status(413).json({
+        success: false,
+        error: `PDF too large. Maximum ${MAX_PDF_BINARY_BYTES / (1024 * 1024)} MB.`
       });
     }
 

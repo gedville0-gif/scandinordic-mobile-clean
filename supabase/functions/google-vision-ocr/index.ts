@@ -13,6 +13,13 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
+// Size limits — defends against memory-exhaustion attacks (audit issue #9).
+// Google Vision rejects images >20 MB anyway; we cap earlier to save bandwidth
+// and protect against attackers chewing up Vision API quota.
+const MAX_IMAGE_BINARY_BYTES = 10 * 1024 * 1024;
+const MAX_IMAGE_BASE64_LENGTH = Math.ceil(MAX_IMAGE_BINARY_BYTES * 4 / 3) + 100;
+const MAX_REQUEST_BODY_BYTES = MAX_IMAGE_BASE64_LENGTH + 1024;
+
 interface Transaction {
   date: string;        // YYYY-MM-DD
   description: string; // merchant name
@@ -29,6 +36,12 @@ serve(async (req: Request) => {
     return json({ error: 'Method not allowed' }, 405);
   }
 
+  // Pre-parse defense: reject oversized bodies before buffering them.
+  const declaredSize = parseInt(req.headers.get('content-length') ?? '0', 10);
+  if (declaredSize > MAX_REQUEST_BODY_BYTES) {
+    return json({ error: `Image too large. Maximum ${MAX_IMAGE_BINARY_BYTES / (1024 * 1024)} MB.` }, 413);
+  }
+
   try {
     console.log('🔄 Processing PDF with Google Vision...');
 
@@ -41,6 +54,10 @@ serve(async (req: Request) => {
     if (!image) {
       console.error('❌ Missing image field');
       return json({ error: 'Missing image field' }, 400);
+    }
+
+    if (image.length > MAX_IMAGE_BASE64_LENGTH) {
+      return json({ error: `Image too large. Maximum ${MAX_IMAGE_BINARY_BYTES / (1024 * 1024)} MB.` }, 413);
     }
 
     if (!GOOGLE_API_KEY) {
