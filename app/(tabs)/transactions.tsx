@@ -23,6 +23,7 @@ import { PDFReviewModal } from '@/components/PDFReviewModal';
 import { supabase } from '@/lib/supabase';
 import { useAnalytics } from '@/lib/analytics';
 import { decode } from 'base64-arraybuffer';
+// eslint-disable-next-line import/no-unresolved -- valid subpath export; ESLint resolver doesn't read package.json exports field
 import * as FileSystem from 'expo-file-system/legacy';
 
 // ─── Dynamic imports (graceful degradation) ──────────────────────────────────
